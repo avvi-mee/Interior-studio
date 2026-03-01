@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import {
   Search,
   Eye,
@@ -119,6 +119,18 @@ export default function ProjectsPage() {
     return matchesSearch && matchesStatus;
   });
 
+  const { roles, employeeId } = currentUser;
+  const isProjectOwner = roles.includes("owner") || roles.includes("project_manager");
+  const visibleProjects = useMemo(() => {
+    if (isProjectOwner) return filteredProjects;
+    return filteredProjects.filter(
+      (p) =>
+        p.assignedTo       === employeeId ||
+        p.assignedDesigner === employeeId ||
+        p.assignedSupervisor === employeeId
+    );
+  }, [filteredProjects, isProjectOwner, employeeId]);
+
   const formatDate = (timestamp: any) => {
     if (!timestamp) return "-";
     const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
@@ -196,8 +208,10 @@ export default function ProjectsPage() {
     employeeId: string
   ) => {
     if (!selectedProject) return;
-    const memberName = employees.find(e => e.id === employeeId)?.name || "Unknown";
-    await assignRole(selectedProject.id, role, employeeId, memberName);
+    const member = employees.find(e => e.id === employeeId);
+    const memberName = member?.name || "Unknown";
+    const memberEmail = member?.email;
+    await assignRole(selectedProject.id, role, employeeId, memberName, memberEmail);
   };
 
   const handleFileUpload = (projectId: string, phaseId: string, taskId: string) => {
@@ -209,7 +223,7 @@ export default function ProjectsPage() {
     const file = e.target.files?.[0];
     if (!file || !pendingFileUpload) return;
     const { projectId, phaseId, taskId } = pendingFileUpload;
-    const uploadedBy = currentUser.employeeId || currentUser.firebaseUser?.id || "unknown";
+    const uploadedBy = currentUser.employeeId || currentUser.firebaseUser?.uid || "unknown";
     await addTaskAttachment(projectId, phaseId, taskId, file, uploadedBy);
     setPendingFileUpload(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
@@ -217,8 +231,8 @@ export default function ProjectsPage() {
 
   const handleAddComment = async (projectId: string, phaseId: string, taskId: string) => {
     if (!commentText.trim()) return;
-    const authorId = currentUser.employeeId || currentUser.firebaseUser?.id || "unknown";
-    const authorName = currentUser.firebaseUser?.user_metadata?.name || "Admin";
+    const authorId = currentUser.employeeId || currentUser.firebaseUser?.uid || "unknown";
+    const authorName = currentUser.firebaseUser?.displayName || "Admin";
     await addTaskComment(projectId, phaseId, taskId, commentText.trim(), authorId, authorName, commentIsInternal);
     setCommentText("");
     setCommentIsInternal(false);
@@ -334,7 +348,7 @@ export default function ProjectsPage() {
       {/* Projects Table */}
       <Card className="border-none shadow-sm overflow-hidden">
         <CardContent className="p-0">
-          {filteredProjects.length === 0 ? (
+          {visibleProjects.length === 0 ? (
             <div className="p-12 text-center">
               <Briefcase className="h-12 w-12 text-gray-300 mx-auto mb-4" />
               <p className="text-gray-500">No projects found</p>
@@ -355,7 +369,7 @@ export default function ProjectsPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filteredProjects.map((project) => (
+                {visibleProjects.map((project) => (
                   <TableRow key={project.id} className="cursor-pointer hover:bg-gray-50" onClick={() => openDetails(project)}>
                     <TableCell>
                       <div className="font-semibold text-gray-900">{project.projectName || project.clientName}</div>

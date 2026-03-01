@@ -2,14 +2,28 @@
 
 import { useCallback, useMemo } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { getSupabase } from "@/lib/supabase";
-import { useRealtimeQuery } from "@/lib/supabaseQuery";
+import { getDb } from "@/lib/firebase";
+import { useFirestoreQuery } from "@/lib/firestoreQuery";
+import {
+    collection,
+    doc,
+    query,
+    orderBy,
+    limit,
+    addDoc,
+    updateDoc,
+    getDocs,
+    where,
+    serverTimestamp,
+    writeBatch,
+    type DocumentSnapshot,
+} from "firebase/firestore";
 
 // =============================================================================
-// v2 changes:
-//   - timeline_events → activity_logs
-//   - assigned_to_name removed (join to get names)
-//   - convertToLead: uses v2 lead fields (estimated_value, no temperature write)
+// Firebase migration:
+//   - consultations → tenants/{tenantId}/consultations
+//   - activity_logs → tenants/{tenantId}/activityLogs
+//   - All fields are camelCase in Firestore
 // =============================================================================
 
 export interface ConsultationRequest {
@@ -31,77 +45,42 @@ export interface ConsultationRequest {
     }>;
 }
 
-const CONSULT_COLS = "id,tenant_id,name,email,phone,requirement,status,assigned_to,source,lead_id,created_at,updated_at";
-
-function mapRowToConsultation(row: any, activityLogs: any[] = []): ConsultationRequest {
+function mapDocToConsultation(snap: DocumentSnapshot): ConsultationRequest {
+    const d = snap.data() ?? {};
     return {
-        id: row.id,
-        clientName: row.name ?? "",
-        phone: row.phone ?? undefined,
-        email: row.email ?? undefined,
-        source: row.source ?? "",
-        requirement: row.requirement ?? "",
-        status: row.status ?? "new",
-        createdAt: row.created_at ?? null,
-        tenantId: row.tenant_id ?? "",
-        assignedTo: row.assigned_to ?? undefined,
-        timeline: activityLogs.map((e: any) => ({
-            action: e.action ?? "",
-            summary: e.summary ?? "",
-            timestamp: e.created_at ?? null,
-            actorId: e.actor_id ?? undefined,
-        })),
+        id: snap.id,
+        clientName: d.clientName ?? d.name ?? "",
+        phone: d.phone ?? undefined,
+        email: d.email ?? undefined,
+        source: d.source ?? "",
+        requirement: d.requirement ?? "",
+        status: d.status ?? "new",
+        createdAt: d.createdAt ?? null,
+        tenantId: d.tenantId ?? "",
+        assignedTo: d.assignedTo ?? undefined,
+        timeline: [],
     };
 }
 
 export function useConsultations(tenantId: string | null) {
     const queryClient = useQueryClient();
     const qk = ["consultations", tenantId] as const;
+    const db = getDb();
 
-    const { data: requests = [], isLoading: loading } = useRealtimeQuery<ConsultationRequest[]>({
+    const collectionRef = useMemo(
+        () =>
+            query(
+                collection(db, `tenants/${tenantId}/consultations`),
+                orderBy("createdAt", "desc"),
+                limit(100)
+            ),
+        [db, tenantId]
+    );
+
+    const { data: requests = [], isLoading: loading } = useFirestoreQuery<ConsultationRequest>({
         queryKey: qk,
-        queryFn: async () => {
-            const supabase = getSupabase();
-
-            const { data: consultationsData, error } = await supabase
-                .from("consultations")
-                .select(CONSULT_COLS)
-                .eq("tenant_id", tenantId!)
-                .order("created_at", { ascending: false });
-
-            if (error) throw error;
-
-            const rows = consultationsData ?? [];
-
-            // v2: Fetch from activity_logs instead of timeline_events
-            const consultationIds = rows.map((r: any) => r.id);
-            let activityMap: Record<string, any[]> = {};
-
-            if (consultationIds.length > 0) {
-                const { data: activityData } = await supabase
-                    .from("activity_logs")
-                    .select("entity_id,action,summary,actor_id,created_at")
-                    .eq("entity_type", "consultation")
-                    .in("entity_id", consultationIds)
-                    .order("created_at", { ascending: true });
-
-                if (activityData) {
-                    for (const event of activityData) {
-                        if (!activityMap[event.entity_id]) {
-                            activityMap[event.entity_id] = [];
-                        }
-                        activityMap[event.entity_id].push(event);
-                    }
-                }
-            }
-
-            return rows.map((row: any) =>
-                mapRowToConsultation(row, activityMap[row.id] ?? [])
-            );
-        },
-        table: "consultations",
-        filter: `tenant_id=eq.${tenantId}`,
-        additionalTables: [{ table: "activity_logs" }],
+        collectionRef,
+        mapDoc: mapDocToConsultation,
         enabled: !!tenantId,
     });
 
@@ -129,29 +108,17 @@ export function useConsultations(tenantId: string | null) {
             if (!tenantId) return false;
             try {
                 const dbUpdates: Record<string, any> = {};
-                const fieldMap: Record<string, string> = {
-                    clientName: "name",
-                    assignedTo: "assigned_to",
-                    createdAt: "created_at",
-                    tenantId: "tenant_id",
-                };
 
                 for (const [key, value] of Object.entries(updates)) {
                     if (key === "id" || key === "timeline") continue;
-                    const dbKey = fieldMap[key] || key;
-                    dbUpdates[dbKey] = value;
+                    dbUpdates[key] = value;
                 }
 
-                const supabase = getSupabase();
-                const { error } = await supabase
-                    .from("consultations")
-                    .update(dbUpdates)
-                    .eq("id", requestId);
+                await updateDoc(
+                    doc(db, `tenants/${tenantId}/consultations`, requestId),
+                    dbUpdates
+                );
 
-                if (error) {
-                    console.error("Error updating consultation request:", error);
-                    return false;
-                }
                 invalidate();
                 return true;
             } catch (error) {
@@ -159,43 +126,37 @@ export function useConsultations(tenantId: string | null) {
                 return false;
             }
         },
-        [tenantId, invalidate]
+        [db, tenantId, invalidate]
     );
 
     const createConsultation = useCallback(
         async (data: Omit<ConsultationRequest, "id" | "createdAt">) => {
             if (!tenantId) return null;
             try {
-                const supabase = getSupabase();
-
-                const { data: inserted, error } = await supabase
-                    .from("consultations")
-                    .insert({
-                        tenant_id: tenantId,
+                const docRef = await addDoc(
+                    collection(db, `tenants/${tenantId}/consultations`),
+                    {
+                        tenantId,
+                        clientName: data.clientName,
                         name: data.clientName,
                         phone: data.phone || null,
                         email: data.email || null,
                         source: data.source,
                         requirement: data.requirement,
                         status: data.status || "new",
-                        assigned_to: data.assignedTo || null,
-                    })
-                    .select()
-                    .single();
-
-                if (error) {
-                    console.error("Error creating consultation:", error);
-                    return null;
-                }
+                        assignedTo: data.assignedTo || null,
+                        createdAt: serverTimestamp(),
+                    }
+                );
 
                 invalidate();
-                return inserted?.id ?? null;
+                return docRef.id;
             } catch (error) {
                 console.error("Error creating consultation:", error);
                 return null;
             }
         },
-        [tenantId, invalidate]
+        [db, tenantId, invalidate]
     );
 
     const convertToLead = useCallback(
@@ -205,62 +166,60 @@ export function useConsultations(tenantId: string | null) {
                 const request = requests.find(r => r.id === requestId);
                 if (!request) return null;
 
-                const supabase = getSupabase();
+                const batch = writeBatch(db);
 
-                // v2: Create lead with new schema fields
-                const { data: leadDoc, error: leadError } = await supabase
-                    .from("leads")
-                    .insert({
-                        tenant_id: tenantId,
-                        name: request.clientName,
-                        email: request.email || "",
-                        phone: request.phone || "",
-                        source: "consultation",
-                        stage: "new",
-                        score: 0,
-                        estimated_value: 0,
-                        follow_up_count: 0,
-                    })
-                    .select()
-                    .single();
+                // Create lead in tenants/{tenantId}/leads
+                const leadRef = doc(collection(db, `tenants/${tenantId}/leads`));
+                batch.set(leadRef, {
+                    tenantId,
+                    name: request.clientName,
+                    email: request.email || "",
+                    phone: request.phone || "",
+                    source: "consultation",
+                    stage: "new",
+                    score: 0,
+                    estimatedValue: 0,
+                    followUpCount: 0,
+                    createdAt: serverTimestamp(),
+                });
 
-                if (leadError || !leadDoc) {
-                    console.error("Error creating lead from consultation:", leadError);
-                    return null;
-                }
-
-                // v2: activity_logs instead of timeline_events
-                await supabase.from("activity_logs").insert({
-                    tenant_id: tenantId,
-                    entity_type: "lead",
-                    entity_id: leadDoc.id,
+                // Log activity for the lead
+                const leadLogRef = doc(collection(db, `tenants/${tenantId}/activityLogs`));
+                batch.set(leadLogRef, {
+                    tenantId,
+                    entityType: "lead",
+                    entityId: leadRef.id,
                     action: "created",
                     summary: `Converted from consultation request ${requestId}`,
+                    createdAt: serverTimestamp(),
                 });
 
                 // Update consultation status to closed and link lead
-                await supabase
-                    .from("consultations")
-                    .update({ status: "closed", lead_id: leadDoc.id })
-                    .eq("id", requestId);
+                batch.update(
+                    doc(db, `tenants/${tenantId}/consultations`, requestId),
+                    { status: "closed", leadId: leadRef.id }
+                );
 
                 // Log consultation conversion
-                await supabase.from("activity_logs").insert({
-                    tenant_id: tenantId,
-                    entity_type: "consultation",
-                    entity_id: requestId,
+                const consultLogRef = doc(collection(db, `tenants/${tenantId}/activityLogs`));
+                batch.set(consultLogRef, {
+                    tenantId,
+                    entityType: "consultation",
+                    entityId: requestId,
                     action: "status_changed",
-                    summary: `Converted to lead ${leadDoc.id}`,
+                    summary: `Converted to lead ${leadRef.id}`,
+                    createdAt: serverTimestamp(),
                 });
 
+                await batch.commit();
                 invalidate();
-                return leadDoc.id;
+                return leadRef.id;
             } catch (error) {
                 console.error("Error converting to lead:", error);
                 return null;
             }
         },
-        [tenantId, requests, invalidate]
+        [db, tenantId, requests, invalidate]
     );
 
     return { requests, stats, loading, updateRequest, createConsultation, convertToLead };

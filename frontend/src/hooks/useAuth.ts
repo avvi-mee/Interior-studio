@@ -1,8 +1,29 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { getSupabase } from "@/lib/supabase";
-import type { User } from "@supabase/supabase-js";
+import { getFirebaseAuth, getDb } from "@/lib/firebase";
+import {
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signInWithPopup,
+  GoogleAuthProvider,
+  sendPasswordResetEmail,
+  signOut as firebaseSignOut,
+  type User,
+} from "firebase/auth";
+import {
+  doc,
+  getDoc,
+  getDocs,
+  setDoc,
+  collection,
+  query,
+  where,
+  limit,
+  serverTimestamp,
+} from "firebase/firestore";
+import { ensureTenantSlug } from "@/lib/firestoreHelpers";
 
 // ---------- Types ----------
 
@@ -63,32 +84,32 @@ function clearCachedTenant(email: string) {
 
 // ---------- DB helpers ----------
 
-function rowToTenant(row: any): Tenant {
+function docToTenant(id: string, data: any): Tenant {
   return {
-    id: row.id,
-    ownerId: row.owner_id,
-    name: row.name,
-    email: row.email,
-    phone: row.phone,
-    slug: row.slug,
-    status: row.status,
-    createdAt: row.created_at,
-    approvedAt: row.approved_at,
-    subscription: row.subscription,
-    settings: row.settings,
+    id,
+    ownerId: data.ownerId || data.owner_id,
+    name: data.name,
+    email: data.email,
+    phone: data.phone,
+    slug: data.slug,
+    status: data.status,
+    createdAt: data.createdAt || data.created_at || "",
+    approvedAt: data.approvedAt || data.approved_at,
+    subscription: data.subscription || "free",
+    settings: data.settings,
   };
 }
 
-function rowToCustomer(uid: string, row: any): Customer {
+function docToCustomer(uid: string, data: any): Customer {
   return {
     uid,
-    email: row.email,
-    displayName: row.display_name || "",
-    photoURL: row.photo_url,
-    phoneNumber: row.phone_number,
-    city: row.city,
-    createdAt: row.created_at,
-    lastLogin: row.last_login,
+    email: data.email,
+    displayName: data.displayName || data.display_name || "",
+    photoURL: data.photoURL || data.photo_url,
+    phoneNumber: data.phoneNumber || data.phone_number,
+    city: data.city,
+    createdAt: data.createdAt || data.created_at,
+    lastLogin: data.lastLogin || data.last_login,
   };
 }
 
@@ -105,21 +126,17 @@ export function useAuth() {
   });
   const resolvingRef = useRef(false);
 
-  // Resolve user role + data from a Supabase User
+  // Resolve user role + data from a Firebase User
   const resolveUser = useCallback(async (authUser: User) => {
     if (resolvingRef.current) return;
     resolvingRef.current = true;
 
-    const supabase = getSupabase();
+    const db = getDb();
 
     try {
-      // Step 1: Check users table for role
-      const { data: userData } = await supabase
-        .from("users")
-        .select("role, tenant_id")
-        .eq("id", authUser.id)
-        .maybeSingle();
-
+      // Step 1: Check users doc for role
+      const userDoc = await getDoc(doc(db, "users", authUser.uid));
+      const userData = userDoc.exists() ? userDoc.data() : null;
       const dbRole = userData?.role as string | undefined;
 
       // --- Superadmin ---
@@ -153,15 +170,13 @@ export function useAuth() {
         }
 
         // Look up tenant by email first (owner flow)
-        const { data: tenantByEmail } = await supabase
-          .from("tenants")
-          .select("*")
-          .eq("email", email)
-          .limit(1)
-          .maybeSingle();
+        const tenantByEmailSnap = await getDocs(
+          query(collection(db, "tenants"), where("email", "==", email), limit(1))
+        );
 
-        if (tenantByEmail) {
-          const tenant = rowToTenant(tenantByEmail);
+        if (!tenantByEmailSnap.empty) {
+          const tDoc = tenantByEmailSnap.docs[0];
+          const tenant = docToTenant(tDoc.id, tDoc.data());
           setCachedTenant(email, tenant);
           setState({
             user: authUser,
@@ -171,19 +186,26 @@ export function useAuth() {
             loading: false,
             error: "",
           });
+          // Backfill slug if missing (fire-and-forget, don't block auth)
+          if (!tenant.slug) {
+            ensureTenantSlug(tenant.id, tenant.name).then((slug) => {
+              tenant.slug = slug;
+              setCachedTenant(email, { ...tenant, slug });
+              setState((prev) => prev.tenant?.id === tenant.id
+                ? { ...prev, tenant: { ...prev.tenant!, slug } }
+                : prev
+              );
+            }).catch((err) => console.warn("Slug backfill failed:", err));
+          }
           return;
         }
 
-        // Fallback: look up tenant by tenant_id from users table
-        if (userData?.tenant_id) {
-          const { data: tenantById } = await supabase
-            .from("tenants")
-            .select("*")
-            .eq("id", userData.tenant_id)
-            .maybeSingle();
-
-          if (tenantById) {
-            const tenant = rowToTenant(tenantById);
+        // Fallback: look up tenant by tenant_id from users doc
+        if (userData?.tenantId || userData?.tenant_id) {
+          const tid = userData.tenantId || userData.tenant_id;
+          const tenantDoc = await getDoc(doc(db, "tenants", tid));
+          if (tenantDoc.exists()) {
+            const tenant = docToTenant(tenantDoc.id, tenantDoc.data());
             setCachedTenant(email, tenant);
             setState({
               user: authUser,
@@ -193,6 +215,17 @@ export function useAuth() {
               loading: false,
               error: "",
             });
+            // Backfill slug if missing (fire-and-forget)
+            if (!tenant.slug) {
+              ensureTenantSlug(tenant.id, tenant.name).then((slug) => {
+                tenant.slug = slug;
+                setCachedTenant(email, { ...tenant, slug });
+                setState((prev) => prev.tenant?.id === tenant.id
+                  ? { ...prev, tenant: { ...prev.tenant!, slug } }
+                  : prev
+                );
+              }).catch((err) => console.warn("Slug backfill failed:", err));
+            }
             return;
           }
         }
@@ -200,18 +233,14 @@ export function useAuth() {
 
       // --- Customer ---
       if (dbRole === "customer" || !dbRole) {
-        const { data: customerData } = await supabase
-          .from("customers")
-          .select("*")
-          .eq("id", authUser.id)
-          .maybeSingle();
+        const customerDoc = await getDoc(doc(db, "customers", authUser.uid));
 
-        if (customerData) {
+        if (customerDoc.exists()) {
           setState({
             user: authUser,
             role: "customer",
             tenant: null,
-            customer: rowToCustomer(authUser.id, customerData),
+            customer: docToCustomer(authUser.uid, customerDoc.data()),
             loading: false,
             error: "",
           });
@@ -238,11 +267,11 @@ export function useAuth() {
 
   // Single auth listener
   useEffect(() => {
-    const supabase = getSupabase();
+    const auth = getFirebaseAuth();
 
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user) {
-        resolveUser(session.user);
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        resolveUser(user);
       } else {
         setState({
           user: null,
@@ -255,24 +284,7 @@ export function useAuth() {
       }
     });
 
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session?.user) {
-        resolveUser(session.user);
-      } else {
-        setState({
-          user: null,
-          role: "anonymous",
-          tenant: null,
-          customer: null,
-          loading: false,
-          error: "",
-        });
-      }
-    });
-
-    return () => subscription.unsubscribe();
+    return () => unsubscribe();
   }, [resolveUser]);
 
   // ---------- Actions ----------
@@ -280,44 +292,35 @@ export function useAuth() {
   /** Login for tenant admins / owners */
   const loginTenant = useCallback(async (email: string, password: string): Promise<boolean> => {
     setState((prev) => ({ ...prev, error: "", loading: true }));
-    const supabase = getSupabase();
+    const auth = getFirebaseAuth();
+    const db = getDb();
 
     try {
-      const { data: authData, error: authError } = await supabase.auth.signInWithPassword({ email, password });
-      if (authError) throw authError;
-
-      const uid = authData.user.id;
+      const cred = await signInWithEmailAndPassword(auth, email, password);
+      const uid = cred.user.uid;
 
       // Resolve tenant
       let tenantData: Tenant | null = null;
       let tenantRole: "owner" | "admin" = "owner";
 
       // Try owner flow
-      const { data: tenantRow } = await supabase
-        .from("tenants")
-        .select("*")
-        .eq("email", email)
-        .limit(1)
-        .maybeSingle();
+      const tenantByEmailSnap = await getDocs(
+        query(collection(db, "tenants"), where("email", "==", email), limit(1))
+      );
 
-      if (tenantRow) {
-        tenantData = rowToTenant(tenantRow);
+      if (!tenantByEmailSnap.empty) {
+        const tDoc = tenantByEmailSnap.docs[0];
+        tenantData = docToTenant(tDoc.id, tDoc.data());
       } else {
-        // Try admin flow via users table
-        const { data: userData } = await supabase
-          .from("users")
-          .select("tenant_id, role")
-          .eq("id", uid)
-          .maybeSingle();
+        // Try admin flow via users doc
+        const userDoc = await getDoc(doc(db, "users", uid));
+        const userData = userDoc.exists() ? userDoc.data() : null;
+        const tid = userData?.tenantId || userData?.tenant_id;
 
-        if (userData?.tenant_id && userData?.role === "admin") {
-          const { data: tenantById } = await supabase
-            .from("tenants")
-            .select("*")
-            .eq("id", userData.tenant_id)
-            .maybeSingle();
-          if (tenantById) {
-            tenantData = rowToTenant(tenantById);
+        if (tid && userData?.role === "admin") {
+          const tenantDoc = await getDoc(doc(db, "tenants", tid));
+          if (tenantDoc.exists()) {
+            tenantData = docToTenant(tenantDoc.id, tenantDoc.data());
             tenantRole = "admin";
           }
         }
@@ -329,7 +332,7 @@ export function useAuth() {
           error: "No designer account found with this email",
           loading: false,
         }));
-        await supabase.auth.signOut();
+        await firebaseSignOut(auth);
         return false;
       }
 
@@ -344,38 +347,45 @@ export function useAuth() {
           error: messages[tenantData!.status] || "Your account is not active",
           loading: false,
         }));
-        await supabase.auth.signOut();
+        await firebaseSignOut(auth);
         return false;
       }
 
       setCachedTenant(email, tenantData);
 
-      // Sync users table
-      await supabase
-        .from("users")
-        .upsert(
-          {
-            id: uid,
-            email,
-            role: "admin",
-            tenant_role: tenantRole,
-            tenant_id: tenantData.id,
-            last_login: new Date().toISOString(),
-          },
-          { onConflict: "id" }
-        )
-        .then(({ error }) => {
-          if (error) console.error("Failed to sync admin user:", error);
-        });
+      // Sync users doc
+      await setDoc(
+        doc(db, "users", uid),
+        {
+          email,
+          role: "admin",
+          tenantRole,
+          tenantId: tenantData.id,
+          lastLogin: serverTimestamp(),
+        },
+        { merge: true }
+      ).catch((err) => console.error("Failed to sync admin user:", err));
 
       setState({
-        user: authData.user,
+        user: cred.user,
         role: "admin",
         tenant: tenantData,
         customer: null,
         loading: false,
         error: "",
       });
+
+      // Backfill slug if missing (fire-and-forget)
+      if (!tenantData.slug) {
+        ensureTenantSlug(tenantData.id, tenantData.name).then((slug) => {
+          setCachedTenant(email, { ...tenantData!, slug });
+          setState((prev) => prev.tenant?.id === tenantData!.id
+            ? { ...prev, tenant: { ...prev.tenant!, slug } }
+            : prev
+          );
+        }).catch((err) => console.warn("Slug backfill failed:", err));
+      }
+
       return true;
     } catch (err: any) {
       console.error("Login error:", err);
@@ -387,11 +397,10 @@ export function useAuth() {
   /** Login for superadmin */
   const loginAdmin = useCallback(async (email: string, password: string): Promise<boolean> => {
     setState((prev) => ({ ...prev, error: "", loading: true }));
-    const supabase = getSupabase();
+    const auth = getFirebaseAuth();
 
     try {
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) throw error;
+      await signInWithEmailAndPassword(auth, email, password);
       // Auth state change listener will handle role resolution
       return true;
     } catch (err: any) {
@@ -403,87 +412,76 @@ export function useAuth() {
 
   /** Login for customers (email/password) */
   const loginCustomer = useCallback(async (email: string, password: string) => {
-    const supabase = getSupabase();
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) throw error;
+    const auth = getFirebaseAuth();
+    const db = getDb();
+    const cred = await signInWithEmailAndPassword(auth, email, password);
 
-    const now = new Date().toISOString();
-    // Update last_login in both tables (best effort)
+    // Update last_login (best effort)
     await Promise.allSettled([
-      supabase.from("customers").update({ last_login: now }).eq("id", data.user.id),
-      supabase.from("users").update({ last_login: now }).eq("id", data.user.id),
+      setDoc(doc(db, "customers", cred.user.uid), { lastLogin: serverTimestamp() }, { merge: true }),
+      setDoc(doc(db, "users", cred.user.uid), { lastLogin: serverTimestamp() }, { merge: true }),
     ]);
 
-    return data;
+    return { user: cred.user, session: null };
   }, []);
 
   /** Sign up customer */
   const signupCustomer = useCallback(
     async (email: string, password: string, displayName: string, mobile: string, tenantId: string) => {
-      const supabase = getSupabase();
-      const { data, error } = await supabase.auth.signUp({ email, password });
-      if (error) throw error;
-      if (!data.user) throw new Error("Signup failed");
+      const auth = getFirebaseAuth();
+      const db = getDb();
+      const cred = await createUserWithEmailAndPassword(auth, email, password);
+      const uid = cred.user.uid;
+      await setDoc(doc(db, "users", uid), {
+        email,
+        name: displayName,
+        phone: mobile,
+        role: "customer",
+        tenantId,
+        lastLogin: serverTimestamp(),
+      }, { merge: true });
 
-      const uid = data.user.id;
+      await setDoc(doc(db, "customers", uid), {
+        email,
+        displayName,
+        phoneNumber: mobile,
+        lastLogin: serverTimestamp(),
+        createdAt: serverTimestamp(),
+      }, { merge: true });
+
       const now = new Date().toISOString();
-
-      await supabase.from("users").upsert(
-        { id: uid, name: displayName, email, phone: mobile, role: "customer", tenant_id: tenantId, last_login: now },
-        { onConflict: "id" }
-      );
-
-      await supabase.from("customers").upsert(
-        { id: uid, email, display_name: displayName, phone_number: mobile, last_login: now },
-        { onConflict: "id" }
-      );
-
       setState((prev) => ({
         ...prev,
         customer: { uid, email, displayName, phoneNumber: mobile, createdAt: now, lastLogin: now },
         role: "customer",
       }));
 
-      return data;
+      return { user: cred.user, session: null };
     },
     []
   );
 
   /** Google OAuth login for customers */
-  const loginWithGoogle = useCallback(async (tenantId?: string) => {
-    const supabase = getSupabase();
-    const redirectUrl =
-      typeof window !== "undefined" ? new URL(window.location.origin) : undefined;
-
-    if (redirectUrl && tenantId) {
-      redirectUrl.searchParams.set("tenant_id", tenantId);
-    }
-
-    const { data, error } = await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: {
-        redirectTo: redirectUrl?.toString(),
-        queryParams: tenantId ? { tenant_id: tenantId } : undefined,
-      },
-    });
-    if (error) throw error;
-    return data;
+  const loginWithGoogle = useCallback(async (_tenantId?: string) => {
+    const auth = getFirebaseAuth();
+    const provider = new GoogleAuthProvider();
+    const result = await signInWithPopup(auth, provider);
+    return { user: result.user, url: null };
   }, []);
 
   /** Password reset */
   const resetPassword = useCallback(async (email: string) => {
-    const supabase = getSupabase();
-    const { error } = await supabase.auth.resetPasswordForEmail(email);
-    if (error) throw error;
+    const auth = getFirebaseAuth();
+    await sendPasswordResetEmail(auth, email);
   }, []);
 
   /** Unified logout */
   const logout = useCallback(async () => {
-    const supabase = getSupabase();
+    const auth = getFirebaseAuth();
     if (state.user?.email) {
       clearCachedTenant(state.user.email);
     }
-    await supabase.auth.signOut();
+    await firebaseSignOut(auth);
     setState({
       user: null,
       role: "anonymous",

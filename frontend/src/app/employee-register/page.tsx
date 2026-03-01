@@ -1,4 +1,3 @@
-
 "use client";
 
 import { useState } from "react";
@@ -9,13 +8,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Briefcase, User, Search, CheckCircle2 } from "lucide-react";
-import { collection, query, where, getDocs, addDoc, serverTimestamp } from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import { getDb } from "@/lib/firebase";
+import { collection, query, where, getDocs, limit } from "firebase/firestore";
 import { useToast } from "@/hooks/use-toast";
 
 interface TenantInfo {
     id: string;
-    businessName: string;
+    name: string;
     ownerName: string;
     email: string;
 }
@@ -49,19 +48,22 @@ export default function EmployeeRegisterPage() {
         setFoundTenant(null);
 
         try {
-            // Query tenants by email
+            const db = getDb();
             const tenantsRef = collection(db, "tenants");
-            const q = query(tenantsRef, where("email", "==", designerEmail));
-            const querySnapshot = await getDocs(q);
+            const tenantQuery = query(tenantsRef, where("email", "==", designerEmail), limit(1));
+            const tenantSnap = await getDocs(tenantQuery);
 
-            if (querySnapshot.empty) {
+            if (tenantSnap.empty) {
                 setSearchError("No designer found with this email.");
             } else {
-                const doc = querySnapshot.docs[0];
+                const tenantDoc = tenantSnap.docs[0];
+                const data = tenantDoc.data();
                 setFoundTenant({
-                    id: doc.id,
-                    ...doc.data()
-                } as TenantInfo);
+                    id: tenantDoc.id,
+                    name: data.name,
+                    ownerName: data.name,
+                    email: data.email,
+                });
             }
         } catch (error) {
             console.error("Error searching tenant:", error);
@@ -87,51 +89,39 @@ export default function EmployeeRegisterPage() {
         setLoading(true);
 
         try {
-            // Check if email already exists in this tenant's employees
-            const employeesRef = collection(db, "tenants", foundTenant.id, "employees");
-            const q = query(employeesRef, where("email", "==", formData.email));
-            const querySnapshot = await getDocs(q);
-
-            if (!querySnapshot.empty) {
-                toast({
-                    title: "Account exists",
-                    description: "An employee with this email is already registered under this designer.",
-                    variant: "destructive"
-                });
-                setLoading(false);
-                return;
-            }
-
-            // Create Employee Document
-            await addDoc(employeesRef, {
-                name: formData.name,
-                email: formData.email,
-                phone: formData.phone,
-                area: formData.area,
-                password: formData.password, // Ideally hash this or use Firebase Auth
-                tenantId: foundTenant.id,
-                totalWork: 0,
-                currentWork: "None",
-                upcomingWork: "None",
-                createdAt: serverTimestamp(),
-                status: "pending" // Optional: for approval workflow
+            // Call API route to create employee with proper Firebase Auth account
+            const response = await fetch("/api/employee-register", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    tenantId: foundTenant.id,
+                    name: formData.name,
+                    email: formData.email,
+                    phone: formData.phone,
+                    area: formData.area,
+                    password: formData.password,
+                }),
             });
+
+            const result = await response.json();
+
+            if (!response.ok) {
+                throw new Error(result.error || "Registration failed");
+            }
 
             toast({
                 title: "Registration Successful",
                 description: "Your account has been created. You can now login.",
             });
 
-            // Redirect to login
             setTimeout(() => {
                 router.push("/login");
             }, 1000);
-
-        } catch (error) {
+        } catch (error: any) {
             console.error("Registration error:", error);
             toast({
                 title: "Registration Failed",
-                description: "Something went wrong. Please try again.",
+                description: error.message || "Something went wrong. Please try again.",
                 variant: "destructive"
             });
         } finally {
@@ -189,7 +179,7 @@ export default function EmployeeRegisterPage() {
                             {foundTenant && (
                                 <div className="mt-4 border rounded-lg p-4 bg-gray-50 flex items-center justify-between">
                                     <div>
-                                        <p className="font-bold text-gray-900">{foundTenant.businessName || "Unnamed Business"}</p>
+                                        <p className="font-bold text-gray-900">{foundTenant.name || "Unnamed Business"}</p>
                                         <p className="text-sm text-gray-500">{foundTenant.ownerName}</p>
                                         <p className="text-xs text-gray-400">{foundTenant.email}</p>
                                     </div>
@@ -209,7 +199,7 @@ export default function EmployeeRegisterPage() {
                         <form onSubmit={handleRegister} className="space-y-4 animate-in fade-in slide-in-from-right-8 duration-500">
                             <div className="flex items-center gap-2 p-3 bg-emerald-50 text-emerald-800 rounded-md text-sm mb-4">
                                 <CheckCircle2 className="h-4 w-4" />
-                                <span>Joining: <strong>{foundTenant.businessName}</strong></span>
+                                <span>Joining: <strong>{foundTenant.name}</strong></span>
                                 <Button
                                     variant="link"
                                     className="ml-auto h-auto p-0 text-emerald-800 underline"

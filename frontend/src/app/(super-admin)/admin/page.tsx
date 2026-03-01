@@ -1,8 +1,8 @@
 "use client";
 
 import { useState } from "react";
+import { getFirebaseAuth } from "@/lib/firebase";
 import { signInWithEmailAndPassword } from "firebase/auth";
-import { auth } from "@/lib/firebase";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -22,7 +22,7 @@ export default function AdminLoginPage() {
         setError("");
 
         try {
-            // In a real app, you'd verify if the user is actually a super admin via Claims or Firestore
+            const auth = getFirebaseAuth();
             await signInWithEmailAndPassword(auth, email, password);
             router.push("/admin/dashboard");
         } catch (err: any) {

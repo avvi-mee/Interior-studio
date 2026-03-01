@@ -1,13 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
 import { writeFile, mkdir } from "fs/promises";
 import path from "path";
+import { verifyAuth } from "@/lib/firestoreServer";
 
 export async function POST(req: NextRequest) {
     try {
+        const { user, response } = await verifyAuth(req);
+        if (!user) return response!;
+
         const formData = await req.formData();
         const file = formData.get("file") as File;
         const tenantId = formData.get("tenantId") as string;
-        const folder = formData.get("folder") as string || "general";
+        const rawFolder = (formData.get("folder") as string) || "general";
+        const folder = rawFolder.replace(/[^a-z0-9_-]/gi, "").slice(0, 64) || "general";
 
         if (!file) {
             return NextResponse.json({ error: "No file uploaded" }, { status: 400 });

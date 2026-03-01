@@ -1,37 +1,52 @@
 "use client";
 
-import { getSupabase } from "@/lib/supabase";
+import { useMemo } from "react";
+import { getDb } from "@/lib/firebase";
+import {
+  collection,
+  query,
+  orderBy,
+  limit as firestoreLimit,
+} from "firebase/firestore";
 import { Activity, formatRelativeTime } from "@/lib/firestoreHelpers";
-import { useRealtimeQuery } from "@/lib/supabaseQuery";
+import { useFirestoreQuery } from "@/lib/firestoreQuery";
 
 export interface ActivityWithTime extends Activity {
   relativeTime: string;
 }
 
-export function useRecentActivity(maxItems: number = 10) {
-  const { data: activities = [], isLoading: loading } = useRealtimeQuery<ActivityWithTime[]>({
-    queryKey: ["recent-activities", maxItems],
-    queryFn: async () => {
-      const supabase = getSupabase();
-      const { data, error } = await supabase
-        .from("activities")
-        .select("*")
-        .order("created_at", { ascending: false })
-        .limit(maxItems);
+function mapDocToActivity(snap: any): ActivityWithTime {
+  const data = snap.data() || {};
+  const createdAt = data.createdAt || data.created_at || "";
+  return {
+    id: snap.id,
+    type: data.type || "signup",
+    description: data.description || "",
+    tenantId: data.tenantId || data.tenant_id,
+    tenantName: data.tenantName || data.tenant_name,
+    createdAt,
+    metadata: data.metadata,
+    relativeTime: createdAt ? formatRelativeTime(createdAt) : "Unknown",
+  };
+}
 
-      if (error) throw error;
-      return (data ?? []).map((row: any) => ({
-        id: row.id,
-        type: row.type,
-        description: row.description,
-        tenantId: row.tenant_id,
-        tenantName: row.tenant_name,
-        createdAt: row.created_at,
-        metadata: row.metadata,
-        relativeTime: row.created_at ? formatRelativeTime(row.created_at) : "Unknown",
-      }));
-    },
-    table: "activities",
+export function useRecentActivity(maxItems: number = 10) {
+  const db = getDb();
+
+  const activitiesQuery = useMemo(
+    () =>
+      query(
+        collection(db, "activities"),
+        orderBy("createdAt", "desc"),
+        firestoreLimit(maxItems)
+      ),
+    [db, maxItems]
+  );
+
+  const { data: activities = [], isLoading: loading } = useFirestoreQuery<ActivityWithTime>({
+    queryKey: ["recent-activities", maxItems],
+    collectionRef: activitiesQuery,
+    mapDoc: mapDocToActivity,
   });
 
   return { activities, loading };

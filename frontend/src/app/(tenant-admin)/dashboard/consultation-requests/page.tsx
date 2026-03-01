@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { MessageSquare, MoreHorizontal, UserPlus } from "lucide-react";
 import { useTenantAuth } from "@/hooks/useTenantAuth";
 import { useConsultations, ConsultationRequest } from "@/hooks/useConsultations";
@@ -23,8 +23,8 @@ import {
     SelectTrigger,
     SelectValue,
 } from "@/components/ui/select";
-import { collection, getDocs } from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import { getDb } from "@/lib/firebase";
+import { collection, getDocs, query, where } from "firebase/firestore";
 
 interface Employee {
     id: string;
@@ -33,18 +33,32 @@ interface Employee {
 
 export default function ConsultationRequestsPage() {
     const { tenant } = useTenantAuth();
-    const { requests, stats, loading, updateRequest } = useConsultations(tenant?.id || null);
+    const { requests, stats, loading, updateRequest, convertToLead } = useConsultations(tenant?.id || null);
     const [employees, setEmployees] = useState<Employee[]>([]);
+    const [convertingId, setConvertingId] = useState<string | null>(null);
+
+    const handleConvertToLead = useCallback(async (requestId: string) => {
+        setConvertingId(requestId);
+        try {
+            await convertToLead(requestId);
+        } catch (error) {
+            console.error("Error converting:", error);
+        } finally {
+            setConvertingId(null);
+        }
+    }, [convertToLead]);
 
     useEffect(() => {
         const fetchEmployees = async () => {
             if (!tenant?.id) return;
             try {
-                const employeesRef = collection(db, "tenants", tenant.id, "employees");
-                const snapshot = await getDocs(employeesRef);
-                const empList = snapshot.docs.map(doc => ({
-                    id: doc.id,
-                    name: doc.data().name
+                const db = getDb();
+                const employeesRef = collection(db, `tenants/${tenant.id}/employees`);
+                const empSnap = await getDocs(employeesRef);
+
+                const empList = empSnap.docs.map(d => ({
+                    id: d.id,
+                    name: d.data().full_name || d.data().name || "Unknown",
                 }));
                 setEmployees(empList);
             } catch (error) {
@@ -64,10 +78,8 @@ export default function ConsultationRequestsPage() {
     };
 
     const handleAssign = async (requestId: string, employeeId: string) => {
-        const employeeName = employees.find(e => e.id === employeeId)?.name || "Unknown";
         await updateRequest(requestId, {
             assignedTo: employeeId,
-            assignedToName: employeeName,
             status: "contacted" // Auto-update status to contacted/in-progress
         });
     };
@@ -129,7 +141,7 @@ export default function ConsultationRequestsPage() {
                                     <TableHead className="text-[10px] font-bold text-gray-400 uppercase">Requirement</TableHead>
                                     <TableHead className="text-[10px] font-bold text-gray-400 uppercase">Status</TableHead>
                                     <TableHead className="text-[10px] font-bold text-gray-400 uppercase">Date</TableHead>
-
+                                    <TableHead className="text-[10px] font-bold text-gray-400 uppercase">Actions</TableHead>
                                 </TableRow>
                             </TableHeader>
                             <TableBody>
@@ -160,7 +172,7 @@ export default function ConsultationRequestsPage() {
                                             </div>
                                         </TableCell>
                                         <TableCell className="text-gray-600 font-mono text-xs">
-                                            {request.phone || request.phoneNumber || "-"}
+                                            {request.phone || "-"}
                                         </TableCell>
                                         <TableCell>
                                             <p className="text-sm text-gray-600 line-clamp-2 max-w-[250px]">{request.requirement}</p>
@@ -171,11 +183,25 @@ export default function ConsultationRequestsPage() {
                                             </Badge>
                                         </TableCell>
                                         <TableCell className="text-gray-500 text-sm">
-                                            {request.createdAt?.toDate ? request.createdAt.toDate().toLocaleDateString("en-US", {
+                                            {request.createdAt ? new Date(request.createdAt).toLocaleDateString("en-US", {
                                                 month: "short",
                                                 day: "numeric",
                                                 year: "numeric"
                                             }) : "-"}
+                                        </TableCell>
+                                        <TableCell>
+                                            {request.status !== "closed" && (
+                                                <Button
+                                                    size="sm"
+                                                    variant="outline"
+                                                    className="h-7 text-xs gap-1"
+                                                    disabled={convertingId === request.id}
+                                                    onClick={() => handleConvertToLead(request.id)}
+                                                >
+                                                    <UserPlus className="h-3 w-3" />
+                                                    {convertingId === request.id ? "Converting..." : "Convert to Lead"}
+                                                </Button>
+                                            )}
                                         </TableCell>
                                     </TableRow>
                                 ))}

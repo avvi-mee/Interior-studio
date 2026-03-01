@@ -2,8 +2,9 @@
 
 import { useCallback } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { getSupabase } from "@/lib/supabase";
-import { useRealtimeQuery } from "@/lib/supabaseQuery";
+import { getDb } from "@/lib/firebase";
+import { collection, doc, addDoc, updateDoc, deleteDoc, query, serverTimestamp } from "firebase/firestore";
+import { useFirestoreQuery } from "@/lib/firestoreQuery";
 
 export interface Project {
   id: string;
@@ -18,79 +19,62 @@ export interface Project {
   createdAt?: any;
 }
 
-function mapRow(row: any): Project {
+function mapDoc(snap: any): Project {
+  const data = snap.data();
   return {
-    id: row.id,
-    title: row.title ?? "",
-    description: row.description ?? "",
-    images: row.images ?? (row.image_url ? [row.image_url] : []),
-    completionDate: row.completion_date ?? "",
-    location: row.location ?? "",
-    category: row.category ?? "",
-    status: row.status ?? "active",
-    tenantId: row.tenant_id,
-    createdAt: row.created_at,
+    id: snap.id,
+    title: data.title ?? "",
+    description: data.description ?? "",
+    images: data.images ?? (data.imageUrl ? [data.imageUrl] : []),
+    completionDate: data.completionDate ?? "",
+    location: data.location ?? "",
+    category: data.category ?? "",
+    status: data.status ?? "active",
+    tenantId: data.tenantId ?? "",
+    createdAt: data.createdAt,
   };
 }
 
 export function usePortfolio(tenantId: string | null) {
   const queryClient = useQueryClient();
   const qk = ["portfolio", tenantId] as const;
+  const db = getDb();
 
-  const { data: projects = [], isLoading: loading } = useRealtimeQuery<Project[]>({
+  const { data: projects = [], isLoading: loading } = useFirestoreQuery<Project>({
     queryKey: qk,
-    queryFn: async () => {
-      const supabase = getSupabase();
-      const { data, error } = await supabase
-        .from("portfolio_projects")
-        .select("*")
-        .eq("tenant_id", tenantId!);
-      if (error) throw error;
-      return (data ?? []).map(mapRow);
-    },
-    table: "portfolio_projects",
-    filter: `tenant_id=eq.${tenantId}`,
+    collectionRef: query(collection(db, `tenants/${tenantId}/portfolio`)),
+    mapDoc,
     enabled: !!tenantId,
   });
 
   const invalidate = useCallback(() => queryClient.invalidateQueries({ queryKey: qk }), [queryClient, qk]);
 
   const updateProjectStatus = useCallback(async (projectId: string, status: "active" | "hidden") => {
-    const supabase = getSupabase();
-    const { error } = await supabase.from("portfolio_projects").update({ status }).eq("id", projectId);
-    if (error) throw error;
+    await updateDoc(doc(db, `tenants/${tenantId}/portfolio`, projectId), { status });
     invalidate();
-  }, [invalidate]);
+  }, [db, tenantId, invalidate]);
 
   const addProject = useCallback(async (projectData: Omit<Project, "id" | "tenantId" | "createdAt" | "status">) => {
     if (!tenantId) throw new Error("No tenant ID");
-    const supabase = getSupabase();
-    const { data, error } = await supabase
-      .from("portfolio_projects")
-      .insert({
-        tenant_id: tenantId,
-        title: projectData.title,
-        description: projectData.description,
-        images: projectData.images,
-        image_url: projectData.images?.[0] ?? null,
-        completion_date: projectData.completionDate,
-        location: projectData.location,
-        category: projectData.category,
-        status: "active",
-      })
-      .select("id")
-      .single();
-    if (error) throw error;
+    const ref = await addDoc(collection(db, `tenants/${tenantId}/portfolio`), {
+      title: projectData.title,
+      description: projectData.description,
+      images: projectData.images,
+      imageUrl: projectData.images?.[0] ?? null,
+      completionDate: projectData.completionDate,
+      location: projectData.location,
+      category: projectData.category,
+      status: "active",
+      createdAt: serverTimestamp(),
+    });
     invalidate();
-    return data.id;
-  }, [tenantId, invalidate]);
+    return ref.id;
+  }, [tenantId, db, invalidate]);
 
   const deleteProject = useCallback(async (projectId: string) => {
-    const supabase = getSupabase();
-    const { error } = await supabase.from("portfolio_projects").delete().eq("id", projectId);
-    if (error) throw error;
+    await deleteDoc(doc(db, `tenants/${tenantId}/portfolio`, projectId));
     invalidate();
-  }, [invalidate]);
+  }, [db, tenantId, invalidate]);
 
   return { projects, loading, updateProjectStatus, addProject, deleteProject };
 }

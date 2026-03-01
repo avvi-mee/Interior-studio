@@ -78,6 +78,13 @@ export interface CustomContentSection {
     order: number;
 }
 
+export interface HomeSectionConfig {
+    id: string;       // "hero"|"services"|"about"|"portfolio"|"testimonials"|"whyChooseUs"|"cta"|"customSections"|"contact"
+    label: string;    // Human-readable label
+    enabled: boolean; // Toggle on/off
+    order: number;    // Sort position
+}
+
 export interface HomePageContent {
     heroSlides: HeroSlide[];
     aboutPreview: AboutPreviewSection;
@@ -85,6 +92,7 @@ export interface HomePageContent {
     whyChooseUs: WhyChooseUsItem[];
     cta: CTASection;
     customSections?: CustomContentSection[];
+    sectionLayout?: HomeSectionConfig[];
     updatedAt?: any;
 }
 

@@ -14,38 +14,50 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
     function getUserRole() {
-      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+      return getUserData().role;
+    }
+
+    function isSuperAdmin() {
+      return isAuthenticated() && getUserRole() == 'superadmin';
     }
 
     function isAdmin() {
-      return isAuthenticated() && getUserRole() == 'admin';
+      return isAuthenticated() && (getUserRole() == 'admin' || isSuperAdmin());
     }
 
     function isTenantOwner(tenantId) {
+      let tenantData = get(/databases/$(database)/documents/tenants/$(tenantId)).data;
       return isAuthenticated() &&
-        get(/databases/$(database)/documents/tenants/$(tenantId)).data.ownerUid == request.auth.uid;
+        (tenantData.ownerId == request.auth.uid
+         || tenantData.ownerUid == request.auth.uid
+         || tenantData.email == request.auth.token.email);
+    }
+
+    function isTenantEmployee(tenantId) {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/tenants/$(tenantId)/employees/$(request.auth.uid));
+    }
+
+    function isTenantMember(tenantId) {
+      return isTenantOwner(tenantId) || isTenantEmployee(tenantId) || isSuperAdmin();
     }
 
     // ========================================
     // Users Collection
     // ========================================
     match /users/{userId} {
-      allow read: if isOwner(userId);
+      allow read: if isOwner(userId) || isSuperAdmin();
       allow create: if isOwner(userId);
       allow update: if isOwner(userId);
-      allow read: if isAdmin();
     }
 
     // ========================================
-    // Collection Group: Employees
-    // ========================================
-    match /{path=**}/employees/{employeeId} {
-      allow read: if true;
-    }
-
-    // ========================================
-    // Customers Collection (Legacy)
+    // Customers Collection
     // ========================================
     match /customers/{customerId} {
       allow read, write: if isOwner(customerId);
@@ -55,15 +67,21 @@ service cloud.firestore {
     // Tenants Collection
     // ========================================
     match /tenants/{tenantId} {
-      allow read: if true;
-      allow update: if isAuthenticated() &&
-        resource.data.ownerUid == request.auth.uid;
+      // Public: only approved/active tenants (storefront needs slug resolution)
+      // Full access: tenant members and superadmin
+      allow read: if isTenantMember(tenantId)
+                  || isSuperAdmin()
+                  || resource.data.status == 'active'
+                  || (isAuthenticated() && resource.data.email == request.auth.token.email)
+                  || (isAuthenticated() && resource.data.ownerUid == request.auth.uid);
+      allow update: if isTenantOwner(tenantId) || isSuperAdmin();
       allow create: if isAuthenticated();
-      
+
       // ========================================
       // Tenant Subcollections
       // ========================================
-      
+
+      // Brand & Theme — public read (storefront), owner write
       match /brand/config {
         allow read: if true;
         allow write: if isTenantOwner(tenantId);
@@ -73,18 +91,25 @@ service cloud.firestore {
         allow write: if isTenantOwner(tenantId);
       }
 
+      // Website pages — public read (storefront), owner write
       match /pages/{pageId} {
         allow read: if true;
         allow write: if isTenantOwner(tenantId);
-        
+
         match /projects/{projectId} {
-             allow read: if true;
-             allow write: if isTenantOwner(tenantId);
+          allow read: if true;
+          allow write: if isTenantOwner(tenantId);
         }
         match /items/{itemId} {
-             allow read: if true;
-             allow write: if isTenantOwner(tenantId);
+          allow read: if true;
+          allow write: if isTenantOwner(tenantId);
         }
+      }
+
+      // Custom pages — public read (storefront nav), owner write
+      match /customPages/{pageId} {
+        allow read: if true;
+        allow write: if isTenantMember(tenantId);
       }
 
       match /websiteConfig/settings {
@@ -92,82 +117,138 @@ service cloud.firestore {
         allow write: if isTenantOwner(tenantId);
       }
 
-      // Estimates (Subcollection version)
-      match /estimates/{estimateId} {
-        // ALLOW EMPLOYEES (Unauthenticated in Firebase terms) TO VIEW/UPDATE
-        allow read, update: if true;
-        allow create: if isAuthenticated();
+      // Portfolio — public read (storefront), tenant member write
+      match /portfolio/{projectId} {
+        allow read: if true;
+        allow write: if isTenantMember(tenantId);
       }
 
-      // Employees Subcollection
+      // Testimonials — public read (storefront), tenant member write
+      match /testimonials/{testimonialId} {
+        allow read: if true;
+        allow write: if isTenantMember(tenantId);
+      }
+
+      // Team Members — public read (storefront about page), tenant member write
+      match /teamMembers/{memberId} {
+        allow read: if true;
+        allow write: if isTenantMember(tenantId);
+      }
+
+      // Estimates — anonymous create (storefront), tenant members read/update
+      match /estimates/{estimateId} {
+        allow read: if isTenantMember(tenantId)
+                    || (isAuthenticated() && resource.data.customerEmail == request.auth.token.email);
+        allow create: if true;
+        allow update: if isTenantMember(tenantId);
+      }
+
+      // Employees — tenant member read, owner create/delete, owner+self update
       match /employees/{employeeId} {
-        // Public read/update allowed for employee dashboard
-        allow read, update: if true;
+        allow read: if isTenantMember(tenantId);
+        allow create, delete: if isTenantOwner(tenantId);
+        allow update: if isTenantOwner(tenantId) || isOwner(employeeId);
+      }
+
+      // Leads — anonymous create (storefront), tenant members read/update/delete
+      match /leads/{leadId} {
+        allow read: if isTenantMember(tenantId);
+        allow create: if true;
+        allow update, delete: if isTenantMember(tenantId);
+
+        // Activity log for leads
+        match /activityLog/{logId} {
+          allow read: if isTenantMember(tenantId);
+          allow create: if isTenantMember(tenantId);
+        }
+      }
+
+      // Consultations — anonymous create (storefront), tenant members read/update
+      match /consultations/{consultationId} {
+        allow read: if isTenantMember(tenantId);
+        allow create: if true;
+        allow update: if isTenantMember(tenantId);
+      }
+
+      // Activity logs (tenant-level) — tenant members only
+      match /activityLogs/{logId} {
+        allow read: if isTenantMember(tenantId);
+        allow create: if isTenantMember(tenantId);
+      }
+
+      // Projects — tenant members + customer (own projects)
+      match /projects/{projectId} {
+        allow read: if isTenantMember(tenantId) || (isAuthenticated() && resource.data.customerId == request.auth.uid);
+        allow create: if isTenantMember(tenantId);
+        allow update: if isTenantMember(tenantId);
+
+        match /activityLog/{logId} {
+          allow read: if isTenantMember(tenantId);
+          allow create: if isTenantMember(tenantId);
+        }
+
+        match /phases/{phaseId} {
+          allow read: if isTenantMember(tenantId);
+          allow write: if isTenantMember(tenantId);
+        }
+
+        match /tasks/{taskId} {
+          allow read: if isTenantMember(tenantId);
+          allow write: if isTenantMember(tenantId);
+        }
+      }
+
+      // Invoices — tenant members + customer (own invoices)
+      match /invoices/{invoiceId} {
+        allow read: if isTenantMember(tenantId) || (isAuthenticated() && resource.data.clientId == request.auth.uid);
+        allow create: if isTenantMember(tenantId);
+        allow update: if isTenantMember(tenantId);
+
+        match /payments/{paymentId} {
+          allow read: if isTenantMember(tenantId);
+          allow create: if isTenantMember(tenantId);
+        }
+      }
+
+      // Vendor Bills — tenant members only
+      match /vendorBills/{billId} {
+        allow read, write: if isTenantMember(tenantId);
+
+        match /payments/{paymentId} {
+          allow read, write: if isTenantMember(tenantId);
+        }
+      }
+
+      // Follow-ups — tenant members only
+      match /followUps/{followUpId} {
+        allow read: if isTenantMember(tenantId);
+        allow write: if isTenantMember(tenantId);
+      }
+
+      // Cities — public read (storefront city dropdown), owner write
+      match /cities/{cityId} {
+        allow read: if true;
         allow write: if isTenantOwner(tenantId);
       }
+
+      // Pricing config — public read (storefront estimator), owner write
+      match /pricing/config {
+        allow read: if true;
+        allow write: if isTenantOwner(tenantId);
+      }
+
+      // Counters — tenant members (for atomic invoice numbering)
+      match /counters/{counterId} {
+        allow read, write: if isTenantMember(tenantId);
+      }
     }
 
     // ========================================
-    // Orders Collection
-    // ========================================
-    match /orders/{orderId} {
-      allow read: if isAuthenticated() &&
-        resource.data.createdByUserId == request.auth.uid;
-      allow read: if isAuthenticated() &&
-        isTenantOwner(resource.data.tenantId);
-      allow create: if isAuthenticated();
-      allow update, delete: if isAuthenticated() &&
-        isTenantOwner(resource.data.tenantId);
-    }
-
-    // ========================================
-    // Estimates Collection (Root)
-    // ========================================
-    match /estimates/{estimateId} {
-      allow read: if isAuthenticated() &&
-        resource.data.createdByUserId == request.auth.uid;
-      allow read: if isAuthenticated() && (
-        isTenantOwner(resource.data.tenantId) ||
-        resource.data.companyId == request.auth.uid
-      );
-      allow create: if isAuthenticated();
-      allow update: if isAuthenticated() && (
-        resource.data.createdByUserId == request.auth.uid ||
-        isTenantOwner(resource.data.tenantId)
-      );
-    }
-
-    // ========================================
-    // Pricing Configs Collection
-    // ========================================
-    match /pricing_configs/{tenantId} {
-      allow read: if true;
-      allow write: if isAuthenticated() && isTenantOwner(tenantId);
-    }
-
-    // ========================================
-    // Activities Collection
+    // Activities Collection (super-admin audit)
     // ========================================
     match /activities/{activityId} {
-      allow read: if isAdmin();
+      allow read: if isSuperAdmin();
       allow create: if isAuthenticated();
-    }
-
-    // ========================================
-    // Consultation Requests Collection
-    // ========================================
-    match /consultation_requests/{requestId} {
-      allow create: if isAuthenticated();
-      // ALLOW EMPLOYEES TO VIEW/UPDATE
-      allow read, update: if true;
-    }
-
-    // ========================================
-    // Portfolio Collection
-    // ========================================
-    match /portfolios/{tenantId} {
-      allow read: if true;
-      allow write: if isAuthenticated() && isTenantOwner(tenantId);
     }
 
     // ========================================

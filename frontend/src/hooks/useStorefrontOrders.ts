@@ -1,52 +1,79 @@
 "use client";
 
-import { getSupabase } from "@/lib/supabase";
-import { Order } from "./useOrders";
-import { useRealtimeQuery } from "@/lib/supabaseQuery";
+import { useState, useEffect } from "react";
 
-const STOREFRONT_COLS = "id,tenant_id,customer_name,customer_email,customer_phone,customer_city,segment,plan,carpet_area,line_items,total_amount,status,assigned_to,pdf_url,valid_until,created_at,updated_at";
-
-function mapRow(row: any): Order {
-  return {
-    id: row.id,
-    customerName: row.customer_name ?? undefined,
-    customerPhone: row.customer_phone ?? undefined,
-    customerEmail: row.customer_email ?? undefined,
-    customerCity: row.customer_city ?? undefined,
-    segment: row.segment ?? undefined,
-    plan: row.plan ?? undefined,
-    carpetArea: row.carpet_area ?? undefined,
-    totalAmount: row.total_amount ?? undefined,
-    status: row.status || "draft",
-    createdAt: row.created_at ?? undefined,
-    tenantId: row.tenant_id ?? "",
-    pdfUrl: row.pdf_url ?? undefined,
-    assignedTo: row.assigned_to ?? undefined,
-    clientName: row.customer_name ?? undefined,
-    clientPhone: row.customer_phone ?? undefined,
-    clientEmail: row.customer_email ?? undefined,
-    estimatedAmount: row.total_amount ?? undefined,
-  };
+export interface StorefrontOrder {
+    id: string;
+    customerName?: string;
+    customerPhone?: string;
+    customerEmail?: string;
+    customerCity?: string;
+    segment?: string;
+    plan?: string;
+    carpetArea?: number;
+    totalAmount?: number;
+    estimatedAmount?: number;
+    status: string;
+    createdAt?: any;
+    tenantId: string;
+    pdfUrl?: string;
+    timeline?: any[];
+    costSummary?: any;
+    projectSummary?: any;
+    // Aliases used by dashboard
+    clientName?: string;
+    clientPhone?: string;
+    clientEmail?: string;
+    assignedTo?: string;
+    // Task attachments (drawings) from linked project
+    attachments?: Array<{ name: string; url: string; taskName: string }>;
 }
 
-export function useStorefrontOrders({ tenantId, userEmail }: { tenantId: string; userEmail: string | null }) {
-  const { data: orders = [], isLoading: loading } = useRealtimeQuery<Order[]>({
-    queryKey: ["storefront-orders", tenantId, userEmail],
-    queryFn: async () => {
-      const supabase = getSupabase();
-      const { data, error } = await supabase
-        .from("estimates")
-        .select(STOREFRONT_COLS)
-        .eq("tenant_id", tenantId)
-        .eq("customer_email", userEmail!)
-        .order("created_at", { ascending: false });
-      if (error) throw error;
-      return (data ?? []).map(mapRow);
-    },
-    table: "estimates",
-    filter: `tenant_id=eq.${tenantId}`,
-    enabled: !!tenantId && !!userEmail,
-  });
+export function useStorefrontOrders({
+    tenantId,
+    userEmail,
+    idToken,
+}: {
+    tenantId: string;
+    userEmail: string | null;
+    idToken?: string | null;
+}) {
+    const [orders, setOrders] = useState<StorefrontOrder[]>([]);
+    const [loading, setLoading] = useState(false);
 
-  return { orders, loading };
+    useEffect(() => {
+        if (!tenantId || !userEmail) return;
+        let cancelled = false;
+
+        const fetchData = () => {
+            const headers: HeadersInit = {};
+            if (idToken) headers["Authorization"] = `Bearer ${idToken}`;
+
+            fetch(`/api/my-estimates?tenantId=${encodeURIComponent(tenantId)}`, { headers })
+                .then((r) => {
+                    if (r.status === 401) {
+                        // Token expired — show empty state; user must re-login
+                        // NOTE: automatic refresh deferred to Phase 6
+                        if (!cancelled) setOrders([]);
+                        return null;
+                    }
+                    return r.json();
+                })
+                .then((data) => {
+                    if (data && !cancelled) setOrders(data.estimates ?? []);
+                })
+                .catch((err) => {
+                    console.error("useStorefrontOrders error:", err);
+                    if (!cancelled) setOrders([]);
+                })
+                .finally(() => { if (!cancelled) setLoading(false); });
+        };
+
+        setLoading(true);
+        fetchData();
+        const id = setInterval(fetchData, 30_000); // near-real-time refresh
+        return () => { cancelled = true; clearInterval(id); };
+    }, [tenantId, userEmail, idToken]);
+
+    return { orders, loading };
 }

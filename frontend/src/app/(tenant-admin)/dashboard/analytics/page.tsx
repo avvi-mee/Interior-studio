@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTenantAuth } from "@/hooks/useTenantAuth";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useAnalytics } from "@/hooks/useAnalytics";
 import {
   TimePreset,
@@ -38,10 +39,12 @@ import {
   AlertCircle,
   CheckCircle,
   XCircle,
+  ShieldAlert,
 } from "lucide-react";
 
 export default function AnalyticsPage() {
   const { tenant, isAuthenticated, loading: authLoading } = useTenantAuth();
+  const currentUser = useCurrentUser();
   const router = useRouter();
 
   const [preset, setPreset] = useState<TimePreset>("this_month");
@@ -62,6 +65,17 @@ export default function AnalyticsPage() {
     setPreset(newPreset);
     setDateRange(newRange);
   };
+
+  if (!currentUser.loading && !currentUser.can("view_analytics")) {
+    return (
+      <div className="p-12 text-center">
+        <ShieldAlert className="h-12 w-12 text-gray-300 mx-auto mb-4" />
+        <h2 className="text-lg font-semibold text-gray-900">Access Denied</h2>
+        <p className="text-sm text-gray-500 mt-1">You don&apos;t have permission to view analytics.</p>
+        <p className="text-xs text-gray-400 mt-2">Contact your admin to request access.</p>
+      </div>
+    );
+  }
 
   if (authLoading || loading) {
     return (
@@ -209,7 +223,7 @@ export default function AnalyticsPage() {
 
         {/* ─── Projects Tab ─── */}
         <TabsContent value="projects" className="space-y-6 mt-6">
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
             <KPICard
               label="Active Projects"
               value={projects.activeProjects}
@@ -230,6 +244,11 @@ export default function AnalyticsPage() {
               label="On-track"
               value={`${projects.onTrackPercent}%`}
               icon={<TrendingUp className="h-5 w-5 text-green-300" />}
+            />
+            <KPICard
+              label="Avg Progress"
+              value={`${projects.avgProjectProgress}%`}
+              icon={<Target className="h-5 w-5 text-blue-300" />}
             />
           </div>
 
@@ -270,7 +289,7 @@ export default function AnalyticsPage() {
 
         {/* ─── Financial Tab ─── */}
         <TabsContent value="financial" className="space-y-6 mt-6">
-          <div className="grid gap-4 md:grid-cols-3 lg:grid-cols-5">
+          <div className="grid gap-4 md:grid-cols-3 lg:grid-cols-3">
             <KPICard
               label="Total Invoiced"
               value={formatCurrency(financial.totalInvoiced)}
@@ -303,6 +322,11 @@ export default function AnalyticsPage() {
                 )
               }
               positive={financial.netCashflow >= 0}
+            />
+            <KPICard
+              label="Collection Rate"
+              value={`${financial.collectionRate}%`}
+              icon={<Target className="h-5 w-5 text-blue-300" />}
             />
           </div>
 

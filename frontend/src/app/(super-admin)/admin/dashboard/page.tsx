@@ -157,7 +157,7 @@ export default function SuperAdminDashboard() {
                                 {approvals.map((approval) => (
                                     <div key={approval.id} className="flex items-center justify-between border-b pb-3 last:border-0">
                                         <div>
-                                            <p className="font-medium">{approval.businessName || approval.name}</p>
+                                            <p className="font-medium">{approval.name}</p>
                                             <p className="text-sm text-muted-foreground">{approval.email}</p>
                                             <p className="text-xs text-muted-foreground mt-1">
                                                 Registered: {formatDate(approval.createdAt)}

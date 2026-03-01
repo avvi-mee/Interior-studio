@@ -2,9 +2,9 @@
 
 import { useEffect, useState, use } from "react";
 import { Loader2 } from "lucide-react";
-import { db } from "@/lib/firebase";
-import { collection, query, orderBy, onSnapshot, doc, getDoc } from "firebase/firestore";
-import { getTenantByStoreId } from "@/lib/firestoreHelpers";
+import { getDb } from "@/lib/firebase";
+import { collection, doc, getDoc, getDocs, query, orderBy, onSnapshot } from "firebase/firestore";
+import { resolveTenant } from "@/lib/firestoreHelpers";
 import type { PortfolioProject, ThemeConfig } from "@/types/website";
 
 export default function PortfolioPage({ params }: { params: Promise<{ tenantId: string }> }) {
@@ -18,7 +18,7 @@ export default function PortfolioPage({ params }: { params: Promise<{ tenantId: 
 
     useEffect(() => {
         let isMounted = true;
-        const unsubs: (() => void)[] = [];
+        const unsubscribers: (() => void)[] = [];
 
         const setupListeners = async () => {
             if (!storeSlug) {
@@ -27,35 +27,76 @@ export default function PortfolioPage({ params }: { params: Promise<{ tenantId: 
             }
 
             try {
-                const tenant = await getTenantByStoreId(storeSlug);
+                const db = getDb();
+                const tenant = await resolveTenant(storeSlug);
                 if (!tenant) {
                     if (isMounted) setLoading(false);
                     return;
                 }
 
                 if (isMounted) {
-                    // 1. Listen to Theme
-                    const themeUnsub = onSnapshot(doc(db, "tenants", tenant.id, "theme", "config"), (doc) => {
-                        if (isMounted && doc.exists()) {
-                            setTheme(doc.data() as ThemeConfig);
-                        }
-                    });
-                    unsubs.push(themeUnsub);
+                    // Fetch theme config
+                    const themeRef = doc(db, `tenants/${tenant.id}/theme/config`);
+                    const themeSnap = await getDoc(themeRef);
 
-                    // 2. Listen to Projects
-                    const projectsRef = collection(db, "tenants", tenant.id, "pages", "portfolio", "projects");
-                    const q = query(projectsRef, orderBy("order", "asc"));
-                    const projectsUnsub = onSnapshot(q, (snapshot) => {
-                        const projectsData = snapshot.docs.map((doc) => ({
-                            id: doc.id,
-                            ...doc.data(),
-                        })) as PortfolioProject[];
-                        if (isMounted) {
-                            setProjects(projectsData);
-                            setLoading(false);
-                        }
+                    if (themeSnap.exists() && isMounted) {
+                        const data = themeSnap.data();
+                        setTheme((data?.content || data) as ThemeConfig);
+                    }
+
+                    // Fetch portfolio projects
+                    const portfolioRef = collection(db, `tenants/${tenant.id}/portfolio`);
+                    const portfolioQuery = query(portfolioRef, orderBy("sort_order", "asc"));
+                    const portfolioSnap = await getDocs(portfolioQuery);
+
+                    if (isMounted) {
+                        setProjects(portfolioSnap.docs.map((d) => {
+                            const p = d.data();
+                            return {
+                                id: d.id,
+                                title: p.title,
+                                category: p.category,
+                                description: p.description,
+                                beforeImageUrl: p.before_image_url,
+                                afterImageUrl: p.after_image_url,
+                                imageStyle: p.image_style,
+                                location: p.location,
+                                showOnHomepage: p.show_on_homepage,
+                                order: p.sort_order,
+                            };
+                        }));
+                    }
+
+                    if (isMounted) setLoading(false);
+
+                    // Realtime: listen for portfolio project changes
+                    const portfolioUnsub = onSnapshot(portfolioQuery, (snap) => {
+                        if (!isMounted) return;
+                        setProjects(snap.docs.map((d) => {
+                            const p = d.data();
+                            return {
+                                id: d.id,
+                                title: p.title,
+                                category: p.category,
+                                description: p.description,
+                                beforeImageUrl: p.before_image_url,
+                                afterImageUrl: p.after_image_url,
+                                imageStyle: p.image_style,
+                                location: p.location,
+                                showOnHomepage: p.show_on_homepage,
+                                order: p.sort_order,
+                            };
+                        }));
                     });
-                    unsubs.push(projectsUnsub);
+                    unsubscribers.push(portfolioUnsub);
+
+                    // Realtime: listen for theme changes
+                    const themeUnsub = onSnapshot(themeRef, (snap) => {
+                        if (!isMounted || !snap.exists()) return;
+                        const data = snap.data();
+                        setTheme((data?.content || data) as ThemeConfig);
+                    });
+                    unsubscribers.push(themeUnsub);
                 }
             } catch (error) {
                 console.error("Error setting up portfolio listeners:", error);
@@ -66,7 +107,7 @@ export default function PortfolioPage({ params }: { params: Promise<{ tenantId: 
         setupListeners();
         return () => {
             isMounted = false;
-            unsubs.forEach(unsub => unsub());
+            unsubscribers.forEach(unsub => unsub());
         };
     }, [storeSlug]);
 

@@ -1,7 +1,8 @@
 "use client";
 
-import { getSupabase } from "@/lib/supabase";
-import { useRealtimeQuery } from "@/lib/supabaseQuery";
+import { getDb } from "@/lib/firebase";
+import { collection, query, orderBy, limit } from "firebase/firestore";
+import { useFirestoreQuery } from "@/lib/firestoreQuery";
 
 export interface Estimate {
   id: string;
@@ -16,37 +17,33 @@ export interface Estimate {
   tenantId: string;
 }
 
-function mapRow(row: any): Estimate {
+function mapDoc(snap: any): Estimate {
+  const data = snap.data();
   return {
-    id: row.id,
-    customerName: row.customer_info?.name ?? row.customer_name ?? "",
-    phoneNumber: row.customer_info?.phone ?? row.phone_number ?? "",
-    email: row.customer_info?.email ?? row.email ?? "",
-    type: row.type ?? row.segment ?? "",
-    amount: row.total_amount ?? row.amount ?? 0,
-    status: row.status || "pending",
-    createdAt: row.created_at,
-    pdfLink: row.pdf_url ?? row.pdf_link ?? undefined,
-    tenantId: row.tenant_id,
+    id: snap.id,
+    customerName: data.customerName ?? data.customer_name ?? "",
+    phoneNumber: data.phoneNumber ?? data.phone_number ?? "",
+    email: data.email ?? "",
+    type: data.type ?? data.segment ?? "",
+    amount: data.totalAmount ?? data.total_amount ?? data.amount ?? 0,
+    status: data.status || "pending",
+    createdAt: data.createdAt ?? data.created_at,
+    pdfLink: data.pdfUrl ?? data.pdf_url ?? data.pdfLink ?? undefined,
+    tenantId: data.tenantId ?? "",
   };
 }
 
 export function useEstimates(tenantId: string | null) {
-  const { data: estimates = [], isLoading: loading } = useRealtimeQuery<Estimate[]>({
-    queryKey: ["estimates", tenantId],
-    queryFn: async () => {
-      const supabase = getSupabase();
-      const { data, error } = await supabase
-        .from("estimates")
-        .select("*")
-        .eq("tenant_id", tenantId!)
-        .order("created_at", { ascending: false });
+  const db = getDb();
 
-      if (error) throw error;
-      return (data ?? []).map(mapRow);
-    },
-    table: "estimates",
-    filter: `tenant_id=eq.${tenantId}`,
+  const { data: estimates = [], isLoading: loading } = useFirestoreQuery<Estimate>({
+    queryKey: ["estimates", tenantId],
+    collectionRef: query(
+      collection(db, `tenants/${tenantId}/estimates`),
+      orderBy("createdAt", "desc"),
+      limit(200)
+    ),
+    mapDoc,
     enabled: !!tenantId,
   });
 

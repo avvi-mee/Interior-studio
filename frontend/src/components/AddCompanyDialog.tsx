@@ -12,10 +12,10 @@ import {
     DialogHeader,
     DialogTitle,
 } from "@/components/ui/dialog";
-import { initializeApp, deleteApp, getApps } from "firebase/app";
-import { getAuth, createUserWithEmailAndPassword } from "firebase/auth";
-import { firebaseConfig } from "@/lib/firebase";
-import { addDesigner, generateStoreId } from "@/lib/firestoreHelpers";
+import { getFirebaseAuth } from "@/lib/firebase";
+import { createUserWithEmailAndPassword } from "firebase/auth";
+import { addDesigner, generateSlug } from "@/lib/firestoreHelpers";
+import { validateTenantSlug } from "@/lib/reservedSlugs";
 
 interface AddCompanyDialogProps {
     open: boolean;
@@ -29,19 +29,37 @@ export function AddCompanyDialog({ open, onOpenChange }: AddCompanyDialogProps) 
         password: "", // Added
         phone: "",
         businessName: "",
-        storeId: "",
+        slug: "",
         plan: "free" as "free" | "basic" | "pro" | "enterprise",
         status: "active" as "active" | "pending", // Added
     });
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState("");
+    const [slugError, setSlugError] = useState("");
 
     const handleBusinessNameChange = (businessName: string) => {
+        const newSlug = generateSlug(businessName);
         setFormData({
             ...formData,
             businessName,
-            storeId: generateStoreId(businessName),
+            slug: newSlug,
         });
+        if (newSlug) {
+            const validation = validateTenantSlug(newSlug);
+            setSlugError(validation.valid ? "" : validation.reason || "");
+        } else {
+            setSlugError("");
+        }
+    };
+
+    const handleSlugChange = (slug: string) => {
+        setFormData({ ...formData, slug });
+        if (slug) {
+            const validation = validateTenantSlug(slug);
+            setSlugError(validation.valid ? "" : validation.reason || "");
+        } else {
+            setSlugError("");
+        }
     };
 
     const handleSubmit = async (e: React.FormEvent) => {
@@ -49,13 +67,18 @@ export function AddCompanyDialog({ open, onOpenChange }: AddCompanyDialogProps) 
         setError("");
         setLoading(true);
 
-        // Secondary app for user creation without signing out current admin
-        let secondaryApp;
-
         try {
             // Validation
-            if (!formData.name || !formData.email || !formData.businessName || !formData.storeId) {
+            if (!formData.name || !formData.email || !formData.businessName || !formData.slug) {
                 setError("Please fill in all required fields");
+                setLoading(false);
+                return;
+            }
+
+            // Validate slug
+            const slugValidation = validateTenantSlug(formData.slug);
+            if (!slugValidation.valid) {
+                setError(slugValidation.reason || "Invalid slug");
                 setLoading(false);
                 return;
             }
@@ -70,7 +93,7 @@ export function AddCompanyDialog({ open, onOpenChange }: AddCompanyDialogProps) 
 
             let uid = "";
 
-            // Create Auth User if password provided
+            // Create Auth User via Firebase Auth if password provided
             if (formData.password) {
                 if (formData.password.length < 6) {
                     setError("Password must be at least 6 characters");
@@ -79,20 +102,17 @@ export function AddCompanyDialog({ open, onOpenChange }: AddCompanyDialogProps) 
                 }
 
                 try {
-                    const secondaryAppName = `secondary-app-${Date.now()}`;
-                    secondaryApp = initializeApp(firebaseConfig, secondaryAppName);
-                    const secondaryAuth = getAuth(secondaryApp);
-
+                    const auth = getFirebaseAuth();
                     const userCredential = await createUserWithEmailAndPassword(
-                        secondaryAuth,
+                        auth,
                         formData.email,
                         formData.password
                     );
                     uid = userCredential.user.uid;
                 } catch (authErr: any) {
-                    if (authErr.code === 'auth/email-already-in-use') {
-                        setError("This email is already registered in Authentication. You can still add the company record.");
-                        // We continue because maybe they just want to link the firestore record
+                    if (authErr.code === "auth/email-already-in-use") {
+                        setError("This email is already registered. You can still add the company record.");
+                        // Continue because maybe they just want to link the tenant record
                     } else {
                         throw authErr;
                     }
@@ -100,7 +120,11 @@ export function AddCompanyDialog({ open, onOpenChange }: AddCompanyDialogProps) 
             }
 
             await addDesigner({
-                ...formData,
+                name: formData.businessName,
+                email: formData.email,
+                phone: formData.phone,
+                slug: formData.slug,
+                plan: formData.plan,
                 uid: uid,
                 status: formData.status
             });
@@ -112,7 +136,7 @@ export function AddCompanyDialog({ open, onOpenChange }: AddCompanyDialogProps) 
                 password: "",
                 phone: "",
                 businessName: "",
-                storeId: "",
+                slug: "",
                 plan: "free",
                 status: "active",
             });
@@ -122,9 +146,6 @@ export function AddCompanyDialog({ open, onOpenChange }: AddCompanyDialogProps) 
             console.error("Error adding company:", err);
             setError(err.message || "Failed to add company. Please try again.");
         } finally {
-            if (secondaryApp) {
-                await deleteApp(secondaryApp);
-            }
             setLoading(false);
         }
     };
@@ -191,14 +212,18 @@ export function AddCompanyDialog({ open, onOpenChange }: AddCompanyDialogProps) 
 
                         <div className="grid grid-cols-2 gap-4">
                             <div className="grid gap-2">
-                                <Label htmlFor="storeId">URL Slug *</Label>
+                                <Label htmlFor="slug">URL Slug *</Label>
                                 <Input
-                                    id="storeId"
+                                    id="slug"
                                     placeholder="abc-interiors"
-                                    value={formData.storeId}
-                                    onChange={(e) => setFormData({ ...formData, storeId: e.target.value })}
+                                    value={formData.slug}
+                                    onChange={(e) => handleSlugChange(e.target.value)}
                                     required
+                                    className={slugError ? "border-destructive" : ""}
                                 />
+                                {slugError && (
+                                    <p className="text-[10px] text-destructive">{slugError}</p>
+                                )}
                             </div>
                             <div className="grid gap-2">
                                 <Label htmlFor="phone">Phone</Label>

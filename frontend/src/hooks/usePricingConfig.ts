@@ -2,8 +2,9 @@
 
 import { useCallback } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { getSupabase } from "@/lib/supabase";
-import { useRealtimeQuery } from "@/lib/supabaseQuery";
+import { getDb } from "@/lib/firebase";
+import { doc, setDoc, serverTimestamp } from "firebase/firestore";
+import { useFirestoreDoc } from "@/lib/firestoreQuery";
 
 // New three-tier pricing structure
 export interface PricingItem {
@@ -64,12 +65,11 @@ export interface CalculationRules {
 }
 
 export interface PricingConfig {
-    // New structure
     categories?: Category[];
     kitchenLayouts?: DropdownOption[];
     kitchenMaterials?: DropdownOption[];
 
-    // Legacy fields (for backward compatibility during migration)
+    // Legacy fields (for backward compatibility)
     roomPricing?: PricingRule[];
     materialGrades?: MultiplierRule[];
     finishTypes?: MultiplierRule[];
@@ -86,7 +86,6 @@ export interface PricingConfig {
         [key: string]: any;
     };
 
-    // New fields
     version?: number;
     active?: boolean;
     carpetAreaSettings?: CarpetAreaSettings;
@@ -95,7 +94,7 @@ export interface PricingConfig {
     lastUpdated: any;
 }
 
-// Legacy interfaces (kept for backward compatibility)
+// Legacy interfaces
 export interface PricingRule {
     id: string;
     name: string;
@@ -142,16 +141,11 @@ export interface BedroomCount {
     enabled: boolean;
 }
 
-// Create default new format config
 function createDefaultConfig(): PricingConfig {
     return {
         categories: [
-            // Residential Categories
             {
-                id: 'living_area',
-                name: 'Living Area',
-                type: 'residential',
-                order: 0,
+                id: 'living_area', name: 'Living Area', type: 'residential', order: 0,
                 items: [
                     { id: 'la_1', name: 'TV Unit', type: 'fixed', basicPrice: 28000, standardPrice: 35000, luxePrice: 42000, enabled: true },
                     { id: 'la_2', name: 'Sofa Unit', type: 'fixed', basicPrice: 36000, standardPrice: 45000, luxePrice: 54000, enabled: true },
@@ -161,10 +155,7 @@ function createDefaultConfig(): PricingConfig {
                 ]
             },
             {
-                id: 'kitchen',
-                name: 'Kitchen',
-                type: 'residential',
-                order: 1,
+                id: 'kitchen', name: 'Kitchen', type: 'residential', order: 1,
                 items: [
                     { id: 'k_1', name: 'Tandem Drawers', type: 'perUnit', basicPrice: 12000, standardPrice: 15000, luxePrice: 18000, enabled: true },
                     { id: 'k_2', name: 'Tall Unit', type: 'perUnit', basicPrice: 20000, standardPrice: 25000, luxePrice: 30000, enabled: true },
@@ -173,10 +164,7 @@ function createDefaultConfig(): PricingConfig {
                 ]
             },
             {
-                id: 'bedroom',
-                name: 'Bedroom',
-                type: 'residential',
-                order: 2,
+                id: 'bedroom', name: 'Bedroom', type: 'residential', order: 2,
                 items: [
                     { id: 'br_1', name: 'Wardrobe', type: 'perUnit', basicPrice: 36000, standardPrice: 45000, luxePrice: 54000, enabled: true },
                     { id: 'br_2', name: 'Bed with Storage', type: 'perUnit', basicPrice: 24000, standardPrice: 30000, luxePrice: 36000, enabled: true },
@@ -184,12 +172,8 @@ function createDefaultConfig(): PricingConfig {
                     { id: 'br_4', name: 'Dressing Table', type: 'perUnit', basicPrice: 16000, standardPrice: 20000, luxePrice: 24000, enabled: true }
                 ]
             },
-            // Commercial Categories
             {
-                id: 'office_space',
-                name: 'Office Space',
-                type: 'commercial',
-                order: 3,
+                id: 'office_space', name: 'Office Space', type: 'commercial', order: 3,
                 items: [
                     { id: 'off_1', name: 'Reception Desk', type: 'fixed', basicPrice: 45000, standardPrice: 60000, luxePrice: 75000, enabled: true },
                     { id: 'off_2', name: 'Conference Table', type: 'fixed', basicPrice: 50000, standardPrice: 70000, luxePrice: 90000, enabled: true },
@@ -198,10 +182,7 @@ function createDefaultConfig(): PricingConfig {
                 ]
             },
             {
-                id: 'retail_shop',
-                name: 'Retail Shop',
-                type: 'commercial',
-                order: 4,
+                id: 'retail_shop', name: 'Retail Shop', type: 'commercial', order: 4,
                 items: [
                     { id: 'ret_1', name: 'Display Racks', type: 'perUnit', basicPrice: 15000, standardPrice: 20000, luxePrice: 25000, enabled: true },
                     { id: 'ret_2', name: 'Billing Counter', type: 'fixed', basicPrice: 30000, standardPrice: 45000, luxePrice: 60000, enabled: true },
@@ -209,10 +190,7 @@ function createDefaultConfig(): PricingConfig {
                 ]
             },
             {
-                id: 'cabin',
-                name: 'Cabin',
-                type: 'commercial',
-                order: 5,
+                id: 'cabin', name: 'Cabin', type: 'commercial', order: 5,
                 items: [
                     { id: 'cb_1', name: 'Executive Desk', type: 'perUnit', basicPrice: 25000, standardPrice: 35000, luxePrice: 45000, enabled: true },
                     { id: 'cb_2', name: 'Credenza/Storage', type: 'perUnit', basicPrice: 15000, standardPrice: 20000, luxePrice: 25000, enabled: true },
@@ -221,10 +199,7 @@ function createDefaultConfig(): PricingConfig {
                 ]
             },
             {
-                id: 'commercial_bathroom',
-                name: 'Bathroom',
-                type: 'commercial',
-                order: 6,
+                id: 'commercial_bathroom', name: 'Bathroom', type: 'commercial', order: 6,
                 items: [
                     { id: 'cbth_1', name: 'Toilet Partition', type: 'perUnit', basicPrice: 18000, standardPrice: 24000, luxePrice: 30000, enabled: true },
                     { id: 'cbth_2', name: 'Vanity with Mirror', type: 'perUnit', basicPrice: 20000, standardPrice: 28000, luxePrice: 36000, enabled: true },
@@ -246,16 +221,8 @@ function createDefaultConfig(): PricingConfig {
             { id: 'km4', name: 'MDF', enabled: true },
             { id: 'km5', name: 'Plywood', enabled: true }
         ],
-        carpetAreaSettings: {
-            minSqft: 200,
-            maxSqft: 10000,
-        },
-        calculationRules: {
-            gstPercent: 0,
-            discountPercent: 0,
-            designFeePercent: 0,
-            additionalCharges: [],
-        },
+        carpetAreaSettings: { minSqft: 200, maxSqft: 10000 },
+        calculationRules: { gstPercent: 0, discountPercent: 0, designFeePercent: 0, additionalCharges: [] },
         version: 1,
         active: true,
         lastUpdated: new Date().toISOString()
@@ -265,35 +232,24 @@ function createDefaultConfig(): PricingConfig {
 export function usePricingConfig(tenantId: string | null) {
     const queryClient = useQueryClient();
     const qk = ["pricing-config", tenantId] as const;
+    const db = getDb();
 
-    const { data: config = null, isLoading: loading } = useRealtimeQuery<PricingConfig | null>({
+    const { data: config = null, isLoading: loading } = useFirestoreDoc<PricingConfig>({
         queryKey: qk,
-        queryFn: async () => {
-            const supabase = getSupabase();
-            const { data, error } = await supabase
-                .from("pricing_configs")
-                .select("*")
-                .eq("tenant_id", tenantId!)
-                .maybeSingle();
-
-            if (error) {
-                console.error("Pricing config fetch error:", error);
-                return createDefaultConfig();
-            }
-
-            if (!data) {
-                return createDefaultConfig();
-            }
+        docRef: doc(db, `tenants/${tenantId}/pricing/config`),
+        mapDoc: (snap) => {
+            if (!snap.exists()) return createDefaultConfig();
+            const data = snap.data()!;
 
             const parsed: PricingConfig = {
                 categories: data.categories || [],
-                kitchenLayouts: data.kitchen_layouts || [],
-                kitchenMaterials: data.kitchen_materials || [],
-                carpetAreaSettings: data.carpet_area_settings || undefined,
-                calculationRules: data.calculation_rules || undefined,
+                kitchenLayouts: data.kitchenLayouts || [],
+                kitchenMaterials: data.kitchenMaterials || [],
+                carpetAreaSettings: data.carpetAreaSettings || undefined,
+                calculationRules: data.calculationRules || undefined,
                 version: data.version || 1,
                 active: true,
-                lastUpdated: data.updated_at,
+                lastUpdated: data.updatedAt || data.lastUpdated,
             };
 
             if (!parsed.categories || parsed.categories.length === 0) {
@@ -302,8 +258,6 @@ export function usePricingConfig(tenantId: string | null) {
 
             return parsed;
         },
-        table: "pricing_configs",
-        filter: `tenant_id=eq.${tenantId}`,
         enabled: !!tenantId,
     });
 
@@ -315,23 +269,16 @@ export function usePricingConfig(tenantId: string | null) {
     const saveConfig = async (newConfig: PricingConfig) => {
         if (!tenantId) return;
         try {
-            const supabase = getSupabase();
-            const { error } = await supabase
-                .from("pricing_configs")
-                .upsert(
-                    {
-                        tenant_id: tenantId,
-                        categories: newConfig.categories || [],
-                        kitchen_layouts: newConfig.kitchenLayouts || [],
-                        kitchen_materials: newConfig.kitchenMaterials || [],
-                        carpet_area_settings: newConfig.carpetAreaSettings || null,
-                        calculation_rules: newConfig.calculationRules || null,
-                        version: (newConfig.version || 0) + 1,
-                    },
-                    { onConflict: "tenant_id" }
-                );
+            await setDoc(doc(db, `tenants/${tenantId}/pricing/config`), {
+                categories: newConfig.categories || [],
+                kitchenLayouts: newConfig.kitchenLayouts || [],
+                kitchenMaterials: newConfig.kitchenMaterials || [],
+                carpetAreaSettings: newConfig.carpetAreaSettings || null,
+                calculationRules: newConfig.calculationRules || null,
+                version: (newConfig.version || 0) + 1,
+                updatedAt: serverTimestamp(),
+            }, { merge: true });
 
-            if (error) throw error;
             invalidate();
             return true;
         } catch (error) {

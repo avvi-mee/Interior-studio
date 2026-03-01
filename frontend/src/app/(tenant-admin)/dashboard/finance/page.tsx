@@ -150,7 +150,8 @@ export default function FinancePage() {
       const project = projects.find((p) => p.id === invoiceForm.projectId);
       await createInvoice({
         projectId: invoiceForm.projectId,
-        clientId: project?.leadId || "",
+        clientId: (project as any)?.customerId || "",  // customer Firebase UID (null on pre-Phase-4 projects)
+        clientEmail: project?.clientEmail || "",
         clientName: invoiceForm.clientName || project?.clientName || "",
         amount: parseFloat(invoiceForm.amount),
         dueDate: new Date(invoiceForm.dueDate),
@@ -211,7 +212,7 @@ export default function FinancePage() {
         paidOn: new Date(),
         method: paymentForm.method as Payment["method"],
         reference: paymentForm.reference || undefined,
-        createdBy: currentUser.employeeId || currentUser.firebaseUser?.id,
+        createdBy: currentUser.employeeId || currentUser.firebaseUser?.uid,
       };
 
       if (paymentTarget.type === "invoice") {

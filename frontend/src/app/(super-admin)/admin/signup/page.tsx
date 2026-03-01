@@ -7,9 +7,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { getFirebaseAuth, getDb } from "@/lib/firebase";
 import { createUserWithEmailAndPassword } from "firebase/auth";
-import { doc, setDoc, serverTimestamp } from "firebase/firestore";
-import { auth, db } from "@/lib/firebase";
+import { doc, setDoc } from "firebase/firestore";
 import { useAdminAuth } from "@/hooks/useAdminAuth";
 import { ShieldCheck, Mail, Lock, User, Loader2, ChevronLeft } from "lucide-react";
 
@@ -26,7 +26,6 @@ export default function AdminSignupPage() {
     const [success, setSuccess] = useState(false);
     const router = useRouter();
 
-    // Redirect if already logged in
     useEffect(() => {
         if (isAuthenticated && !authLoading) {
             router.push("/admin/dashboard");
@@ -39,7 +38,6 @@ export default function AdminSignupPage() {
         setLoading(true);
 
         try {
-            // Validation
             if (!formData.name || !formData.email || !formData.password) {
                 setError("Please fill in all required fields");
                 setLoading(false);
@@ -58,24 +56,27 @@ export default function AdminSignupPage() {
                 return;
             }
 
+            const auth = getFirebaseAuth();
+            const db = getDb();
+
             // Create Firebase Auth account
-            const userCredential = await createUserWithEmailAndPassword(auth, formData.email, formData.password);
+            const userCredential = await createUserWithEmailAndPassword(
+                auth,
+                formData.email,
+                formData.password
+            );
 
             // Create Super Admin record in 'users' collection
-            // Note: We use role 'super-admin' or 'admin' as per firestore rules
-            // In your current firestore.rules, isAdmin() checks for role == 'admin'
             await setDoc(doc(db, "users", userCredential.user.uid), {
-                uid: userCredential.user.uid,
                 name: formData.name,
                 email: formData.email,
-                role: "super-admin", // We'll use super-admin to distinguish from tenant admins
-                isSuperAdmin: true,
-                createdAt: serverTimestamp(),
+                role: "superadmin",
+                is_super_admin: true,
+                created_at: new Date().toISOString(),
             });
 
             setSuccess(true);
 
-            // Redirect to admin dashboard after 2 seconds
             setTimeout(() => {
                 router.push("/admin/dashboard");
             }, 2000);

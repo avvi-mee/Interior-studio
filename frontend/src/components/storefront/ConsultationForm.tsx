@@ -6,17 +6,17 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Loader2, CheckCircle2, Phone, Mail, User, MessageSquare } from "lucide-react";
-import { db } from "@/lib/firebase";
-import { collection, addDoc, serverTimestamp } from "firebase/firestore";
+import { getDb } from "@/lib/firebase";
+import { collection, addDoc } from "firebase/firestore";
 
 interface ConsultationFormProps {
     tenantId: string;
-    storeId: string;
+    storeId?: string; // deprecated, unused in v2
     customer?: any;
     onSuccess?: () => void;
 }
 
-export default function ConsultationForm({ tenantId, storeId, customer, onSuccess }: ConsultationFormProps) {
+export default function ConsultationForm({ tenantId, customer, onSuccess }: ConsultationFormProps) {
     const [name, setName] = useState("");
     const [phone, setPhone] = useState("");
     const [email, setEmail] = useState("");
@@ -44,17 +44,17 @@ export default function ConsultationForm({ tenantId, storeId, customer, onSucces
         setIsSubmitting(true);
 
         try {
-            await addDoc(collection(db, "consultation_requests"), {
-                tenantId,
-                storeId,
-                clientName: name,
+            const db = getDb();
+            await addDoc(collection(db, `tenants/${tenantId}/consultations`), {
+                tenant_id: tenantId,
+                name: name,
                 phone: phone,
                 email: email,
                 source: "website",
                 requirement: requirement,
                 status: "new",
-                createdAt: serverTimestamp(),
-                userId: customer?.uid || null
+                customer_uid: customer?.uid || null,
+                created_at: new Date().toISOString(),
             });
 
             setIsSuccess(true);

@@ -1,9 +1,20 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { getSupabase } from "@/lib/supabase";
-import { useRealtimeQuery } from "@/lib/supabaseQuery";
+import { getDb } from "@/lib/firebase";
+import { useFirestoreDoc, useFirestoreQuery } from "@/lib/firestoreQuery";
+import { uploadImage as uploadToStorage } from "@/lib/storageHelpers";
+import {
+    collection,
+    doc,
+    query,
+    where,
+    orderBy,
+    setDoc,
+    serverTimestamp,
+    type DocumentSnapshot,
+} from "firebase/firestore";
 
 export interface WebsiteConfig {
     brandName: string;
@@ -41,28 +52,28 @@ const defaultConfig: WebsiteConfig = {
     backgroundColor: "#ffffff",
 };
 
-// Helper: map DB row (tenant_page_configs content) to WebsiteConfig
-function rowToConfig(content: any): WebsiteConfig {
-    if (!content) return defaultConfig;
+// Helper: map Firestore doc data to WebsiteConfig
+function docToConfig(data: any): WebsiteConfig {
+    if (!data) return defaultConfig;
     return {
         ...defaultConfig,
-        brandName: content.brandName ?? content.brand_name ?? defaultConfig.brandName,
-        headerTitle: content.headerTitle ?? content.header_title ?? defaultConfig.headerTitle,
-        phone: content.phone ?? defaultConfig.phone,
-        email: content.email ?? defaultConfig.email,
-        primaryColor: content.primaryColor ?? content.primary_color ?? defaultConfig.primaryColor,
-        secondaryColor: content.secondaryColor ?? content.secondary_color ?? defaultConfig.secondaryColor,
-        logoUrl: content.logoUrl ?? content.logo_url ?? defaultConfig.logoUrl,
-        faviconUrl: content.faviconUrl ?? content.favicon_url ?? defaultConfig.faviconUrl,
-        heroImageUrl: content.heroImageUrl ?? content.hero_image_url ?? defaultConfig.heroImageUrl,
-        heroHeading: content.heroHeading ?? content.hero_heading ?? defaultConfig.heroHeading,
-        heroSubheading: content.heroSubheading ?? content.hero_subheading ?? defaultConfig.heroSubheading,
-        footerText: content.footerText ?? content.footer_text ?? defaultConfig.footerText,
-        accentColor: content.accentColor ?? content.accent_color ?? undefined,
-        buttonRadius: content.buttonRadius ?? content.button_radius ?? undefined,
-        backgroundColor: content.backgroundColor ?? content.background_color ?? defaultConfig.backgroundColor,
-        fontStyle: content.fontStyle ?? content.font_style ?? undefined,
-        updatedAt: content.updatedAt ?? content.updated_at ?? undefined,
+        brandName: data.brandName ?? defaultConfig.brandName,
+        headerTitle: data.headerTitle ?? defaultConfig.headerTitle,
+        phone: data.phone ?? defaultConfig.phone,
+        email: data.email ?? defaultConfig.email,
+        primaryColor: data.primaryColor ?? defaultConfig.primaryColor,
+        secondaryColor: data.secondaryColor ?? defaultConfig.secondaryColor,
+        logoUrl: data.logoUrl ?? defaultConfig.logoUrl,
+        faviconUrl: data.faviconUrl ?? defaultConfig.faviconUrl,
+        heroImageUrl: data.heroImageUrl ?? defaultConfig.heroImageUrl,
+        heroHeading: data.heroHeading ?? defaultConfig.heroHeading,
+        heroSubheading: data.heroSubheading ?? defaultConfig.heroSubheading,
+        footerText: data.footerText ?? defaultConfig.footerText,
+        accentColor: data.accentColor ?? undefined,
+        buttonRadius: data.buttonRadius ?? undefined,
+        backgroundColor: data.backgroundColor ?? defaultConfig.backgroundColor,
+        fontStyle: data.fontStyle ?? undefined,
+        updatedAt: data.updatedAt ?? undefined,
     };
 }
 
@@ -70,59 +81,123 @@ export function useWebsiteConfig(tenantId: string | null) {
     const queryClient = useQueryClient();
     const qk = ["website-config", tenantId] as const;
     const [saving, setSaving] = useState(false);
+    const db = getDb();
 
-    const { data: config = defaultConfig, isLoading: loading } = useRealtimeQuery<WebsiteConfig>({
-        queryKey: qk,
-        queryFn: async () => {
-            const supabase = getSupabase();
-            const { data, error } = await supabase
-                .from("tenant_page_configs")
-                .select("content")
-                .eq("tenant_id", tenantId!)
-                .eq("page_type", "website_config")
-                .maybeSingle();
+    // Read from canonical sources: brand/config + theme/config
+    const brandDocRef = useMemo(
+        () => doc(db, `tenants/${tenantId}/brand/config`),
+        [db, tenantId]
+    );
 
-            if (error) {
-                console.error("Error fetching website config:", error);
-                return defaultConfig;
-            }
+    const themeDocRef = useMemo(
+        () => doc(db, `tenants/${tenantId}/theme/config`),
+        [db, tenantId]
+    );
 
-            if (data && data.content) {
-                return rowToConfig(data.content);
-            }
-            return defaultConfig;
+    const { data: brandData = null, isLoading: brandLoading } = useFirestoreDoc<Partial<WebsiteConfig>>({
+        queryKey: ["website-config-brand", tenantId],
+        docRef: brandDocRef,
+        mapDoc: (snap: DocumentSnapshot) => {
+            if (!snap.exists()) return {};
+            const d = snap.data() ?? {};
+            return {
+                brandName: d.brandName ?? d.companyName,
+                headerTitle: d.headerTitle ?? d.tagline,
+                phone: d.phone,
+                email: d.email,
+                logoUrl: d.logoUrl,
+                faviconUrl: d.faviconUrl,
+                heroImageUrl: d.heroImageUrl,
+                heroHeading: d.heroHeading,
+                heroSubheading: d.heroSubheading,
+                footerText: d.footerText,
+            };
         },
-        table: "tenant_page_configs",
-        filter: `tenant_id=eq.${tenantId}`,
         enabled: !!tenantId,
     });
 
+    const { data: themeData = null, isLoading: themeLoading } = useFirestoreDoc<Partial<WebsiteConfig>>({
+        queryKey: ["website-config-theme", tenantId],
+        docRef: themeDocRef,
+        mapDoc: (snap: DocumentSnapshot) => {
+            if (!snap.exists()) return {};
+            const d = snap.data() ?? {};
+            return {
+                primaryColor: d.primaryColor,
+                secondaryColor: d.secondaryColor,
+                accentColor: d.accentColor,
+                buttonRadius: d.buttonRadius,
+                backgroundColor: d.backgroundColor,
+                fontStyle: d.fontStyle,
+            };
+        },
+        enabled: !!tenantId,
+    });
+
+    const config = useMemo(() => ({
+        ...defaultConfig,
+        ...(brandData ?? {}),
+        ...(themeData ?? {}),
+    } as WebsiteConfig), [brandData, themeData]);
+
+    const loading = brandLoading || themeLoading;
+
     const invalidate = useCallback(
-        () => queryClient.invalidateQueries({ queryKey: qk }),
-        [queryClient, qk]
+        () => {
+            queryClient.invalidateQueries({ queryKey: ["website-config-brand", tenantId] });
+            queryClient.invalidateQueries({ queryKey: ["website-config-theme", tenantId] });
+        },
+        [queryClient, tenantId]
     );
 
-    // Save config
+    // Save config — writes to brand/config and theme/config (canonical sources)
     const saveConfig = async (updates: Partial<WebsiteConfig>) => {
         if (!tenantId) return false;
 
         setSaving(true);
         try {
-            const supabase = getSupabase();
-            const mergedContent = { ...config, ...updates };
+            const brandFields: Partial<WebsiteConfig> = {};
+            const themeFields: Partial<WebsiteConfig> = {};
+            const brandKeys: (keyof WebsiteConfig)[] = [
+                "brandName", "headerTitle", "phone", "email",
+                "logoUrl", "faviconUrl", "heroImageUrl",
+                "heroHeading", "heroSubheading", "footerText",
+            ];
+            const themeKeys: (keyof WebsiteConfig)[] = [
+                "primaryColor", "secondaryColor", "accentColor",
+                "buttonRadius", "backgroundColor", "fontStyle",
+            ];
 
-            const { error } = await supabase
-                .from("tenant_page_configs")
-                .upsert(
-                    {
-                        tenant_id: tenantId,
-                        page_type: "website_config",
-                        content: mergedContent,
-                    },
-                    { onConflict: "tenant_id,page_type" }
+            for (const [key, value] of Object.entries(updates)) {
+                if (brandKeys.includes(key as keyof WebsiteConfig)) {
+                    (brandFields as any)[key] = value;
+                }
+                if (themeKeys.includes(key as keyof WebsiteConfig)) {
+                    (themeFields as any)[key] = value;
+                }
+            }
+
+            const promises: Promise<void>[] = [];
+            if (Object.keys(brandFields).length > 0) {
+                promises.push(
+                    setDoc(
+                        doc(db, `tenants/${tenantId}/brand/config`),
+                        { ...brandFields, updatedAt: serverTimestamp() },
+                        { merge: true }
+                    )
                 );
+            }
+            if (Object.keys(themeFields).length > 0) {
+                promises.push(
+                    setDoc(
+                        doc(db, `tenants/${tenantId}/theme/config`),
+                        { ...themeFields, updatedAt: serverTimestamp() },
+                        { merge: true }
+                    )
+                );
+            }
 
-            if (error) throw error;
+            await Promise.all(promises);
             invalidate();
             return true;
         } catch (error) {
@@ -133,25 +208,12 @@ export function useWebsiteConfig(tenantId: string | null) {
         }
     };
 
-    // Upload image (uses Supabase Storage)
+    // Upload image (uses Firebase Storage)
     const uploadImage = async (file: File, type: "logo" | "hero"): Promise<string | null> => {
         if (!tenantId) return null;
 
         try {
-            const supabase = getSupabase();
-            const path = `tenants/${tenantId}/website/${type}_${Date.now()}`;
-
-            const { error: uploadError } = await supabase.storage
-                .from("tenant-assets")
-                .upload(path, file, { upsert: true });
-
-            if (uploadError) throw uploadError;
-
-            const { data: urlData } = supabase.storage
-                .from("tenant-assets")
-                .getPublicUrl(path);
-
-            const url = urlData.publicUrl;
+            const url = await uploadToStorage(file, tenantId, "website");
 
             // Auto-save URL
             const field = type === "logo" ? "logoUrl" : "heroImageUrl";
@@ -165,7 +227,7 @@ export function useWebsiteConfig(tenantId: string | null) {
     };
 
     return {
-        config,
+        config: config ?? defaultConfig,
         loading,
         saving,
         saveConfig,
@@ -177,6 +239,7 @@ export function useWebsiteConfig(tenantId: string | null) {
 export function usePublicWebsiteConfig(storeSlug: string) {
     const [tenantId, setTenantId] = useState<string | null>(null);
     const [resolving, setResolving] = useState(true);
+    const db = getDb();
 
     // Resolve slug to tenant ID
     useEffect(() => {
@@ -194,10 +257,10 @@ export function usePublicWebsiteConfig(storeSlug: string) {
             }
         }, 3000);
 
-        const resolveTenant = async () => {
+        const doResolveTenant = async () => {
             try {
-                const { getTenantBySlug } = await import("@/lib/firestoreHelpers");
-                const tenant = await getTenantBySlug(storeSlug.toLowerCase()) || await getTenantBySlug(storeSlug);
+                const { resolveTenant } = await import("@/lib/firestoreHelpers");
+                const tenant = await resolveTenant(storeSlug);
                 if (cancelled) return;
                 clearTimeout(timeoutId);
                 if (tenant) {
@@ -215,7 +278,7 @@ export function usePublicWebsiteConfig(storeSlug: string) {
             }
         };
 
-        resolveTenant();
+        doResolveTenant();
 
         return () => {
             cancelled = true;
@@ -223,84 +286,91 @@ export function usePublicWebsiteConfig(storeSlug: string) {
         };
     }, [storeSlug]);
 
-    const qk = ["public-website-config", tenantId] as const;
+    const brandDocRef = useMemo(
+        () => doc(db, `tenants/${tenantId}/brand/config`),
+        [db, tenantId]
+    );
 
-    const { data: config = null, isLoading: queryLoading } = useRealtimeQuery<WebsiteConfig>({
-        queryKey: qk,
-        queryFn: async () => {
-            const supabase = getSupabase();
+    const themeDocRef = useMemo(
+        () => doc(db, `tenants/${tenantId}/theme/config`),
+        [db, tenantId]
+    );
 
-            // Fetch brand and theme configs in parallel
-            const [brandRes, themeRes, configRes] = await Promise.all([
-                supabase
-                    .from("tenant_page_configs")
-                    .select("content")
-                    .eq("tenant_id", tenantId!)
-                    .eq("page_type", "brand")
-                    .maybeSingle(),
-                supabase
-                    .from("tenant_page_configs")
-                    .select("content")
-                    .eq("tenant_id", tenantId!)
-                    .eq("page_type", "theme")
-                    .maybeSingle(),
-                supabase
-                    .from("tenant_page_configs")
-                    .select("content")
-                    .eq("tenant_id", tenantId!)
-                    .eq("page_type", "website_config")
-                    .maybeSingle(),
-            ]);
-
-            const brandData = brandRes.data?.content || {};
-            const themeData = themeRes.data?.content || {};
-            const configData = configRes.data?.content || {};
-
+    const { data: brandData = null, isLoading: brandLoading } = useFirestoreDoc<Partial<WebsiteConfig>>({
+        queryKey: ["public-brand-config", tenantId],
+        docRef: brandDocRef,
+        mapDoc: (snap: DocumentSnapshot) => {
+            if (!snap.exists()) return {};
+            const d = snap.data() ?? {};
             return {
-                ...defaultConfig,
-                ...brandData,
-                ...themeData,
-                ...configData,
-            } as WebsiteConfig;
+                brandName: d.brandName ?? d.companyName,
+                headerTitle: d.headerTitle ?? d.tagline,
+                phone: d.phone,
+                email: d.email,
+                logoUrl: d.logoUrl,
+                faviconUrl: d.faviconUrl,
+                footerText: d.footerText,
+            };
         },
-        table: "tenant_page_configs",
-        filter: `tenant_id=eq.${tenantId}`,
         enabled: !!tenantId,
     });
 
-    const loading = resolving || queryLoading;
+    const { data: themeData = null, isLoading: themeLoading } = useFirestoreDoc<Partial<WebsiteConfig>>({
+        queryKey: ["public-theme-config", tenantId],
+        docRef: themeDocRef,
+        mapDoc: (snap: DocumentSnapshot) => {
+            if (!snap.exists()) return {};
+            const d = snap.data() ?? {};
+            return {
+                primaryColor: d.primaryColor,
+                secondaryColor: d.secondaryColor,
+                accentColor: d.accentColor,
+                buttonRadius: d.buttonRadius,
+                backgroundColor: d.backgroundColor,
+                fontStyle: d.fontStyle,
+            };
+        },
+        enabled: !!tenantId,
+    });
+
+    const config = useMemo(() => {
+        return {
+            ...defaultConfig,
+            ...(brandData ?? {}),
+            ...(themeData ?? {}),
+        } as WebsiteConfig;
+    }, [brandData, themeData]);
+
+    const loading = resolving || brandLoading || themeLoading;
 
     return { config: config ?? defaultConfig, tenantId, loading };
 }
 
 // Public hook - for storefront navigation (reads custom pages)
 export function usePublicCustomPages(tenantId: string | null) {
-    const qk = ["public-custom-pages", tenantId] as const;
+    const db = getDb();
 
-    const { data: customPages = [] } = useRealtimeQuery<{ title: string; slug: string; order: number }[]>({
-        queryKey: qk,
-        queryFn: async () => {
-            const supabase = getSupabase();
-            const { data, error } = await supabase
-                .from("custom_pages")
-                .select("title, slug, sort_order, is_published")
-                .eq("tenant_id", tenantId!)
-                .eq("is_published", true)
-                .order("sort_order", { ascending: true });
+    const collectionRef = useMemo(
+        () =>
+            query(
+                collection(db, `tenants/${tenantId}/customPages`),
+                where("isPublished", "==", true),
+                orderBy("sortOrder", "asc")
+            ),
+        [db, tenantId]
+    );
 
-            if (error) {
-                console.error("Error fetching custom pages:", error);
-                return [];
-            }
-
-            return (data ?? []).map((row: any) => ({
-                title: row.title,
-                slug: row.slug,
-                order: row.sort_order ?? 0,
-            }));
+    const { data: customPages = [] } = useFirestoreQuery<{ title: string; slug: string; order: number }>({
+        queryKey: ["public-custom-pages", tenantId],
+        collectionRef,
+        mapDoc: (snap: DocumentSnapshot) => {
+            const d = snap.data() ?? {};
+            return {
+                title: d.title ?? "",
+                slug: d.slug ?? "",
+                order: d.sortOrder ?? 0,
+            };
         },
-        table: "custom_pages",
-        filter: `tenant_id=eq.${tenantId}`,
         enabled: !!tenantId,
     });
 

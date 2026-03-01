@@ -84,10 +84,7 @@ export default function PortfolioPage() {
 
             // Upload image if selected
             if (selectedImage) {
-                const timestamp = Date.now();
-                const safeName = selectedImage.name.replace(/[^a-zA-Z0-9.]/g, '_');
-                const imagePath = `portfolio/${tenant.id}/${timestamp}_${safeName}`;
-                imageUrl = await uploadImage(selectedImage, imagePath);
+                imageUrl = await uploadImage(selectedImage, tenant.id, "portfolio");
             }
 
             // Add Project to Firestore

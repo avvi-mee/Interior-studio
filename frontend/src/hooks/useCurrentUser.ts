@@ -2,9 +2,10 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { getSupabase } from "@/lib/supabase";
+import { getFirebaseAuth, getDb } from "@/lib/firebase";
+import { onAuthStateChanged, type User } from "firebase/auth";
+import { doc, getDoc, getDocs, collection, query, where } from "firebase/firestore";
 import { can as canCheck, PermissionAction } from "@/lib/permissions";
-import type { User } from "@supabase/supabase-js";
 
 export type UserType = "owner" | "employee" | "superadmin" | null;
 
@@ -26,72 +27,63 @@ interface ResolvedUser {
 }
 
 async function resolveUserFromDb(user: User): Promise<ResolvedUser> {
-  const supabase = getSupabase();
+  const db = getDb();
 
-  const { data: userData } = await supabase
-    .from("users")
-    .select("role, tenant_id")
-    .eq("id", user.id)
-    .maybeSingle();
+  const userDoc = await getDoc(doc(db, "users", user.uid));
+  const userData = userDoc.exists() ? userDoc.data() : null;
 
   if (userData?.role === "superadmin") {
     return { userType: "superadmin", tenantId: null, roles: ["owner"], employeeId: null };
   }
 
   if (userData?.role === "admin") {
-    return { userType: "owner", tenantId: userData.tenant_id || null, roles: ["owner"], employeeId: null };
+    const tid = userData.tenantId || userData.tenant_id || null;
+    return { userType: "owner", tenantId: tid, roles: ["owner"], employeeId: null };
   }
 
-  // Check employees table
-  const { data: empData } = await supabase
-    .from("employees")
-    .select("id, tenant_id, roles, role")
-    .eq("auth_uid", user.id)
-    .eq("is_active", true)
-    .maybeSingle();
-
-  if (empData) {
-    const empRoles =
-      empData.roles && empData.roles.length > 0
-        ? empData.roles
-        : [empData.role || "designer"];
-    return {
-      userType: "employee",
-      tenantId: empData.tenant_id || null,
-      roles: Array.isArray(empRoles) ? empRoles : [empRoles],
-      employeeId: empData.id || null,
-    };
+  // Check employees — search all tenants for this user as employee
+  // First check if user doc has tenantId
+  const tid = userData?.tenantId || userData?.tenant_id;
+  if (tid) {
+    const empDoc = await getDoc(doc(db, "tenants", tid, "employees", user.uid));
+    if (empDoc.exists()) {
+      const empData = empDoc.data();
+      if (empData.isActive !== false) {
+        const empRoles =
+          empData.roles && empData.roles.length > 0
+            ? empData.roles
+            : [empData.role || "designer"];
+        return {
+          userType: "employee",
+          tenantId: tid,
+          roles: Array.isArray(empRoles) ? empRoles : [empRoles],
+          employeeId: empDoc.id,
+        };
+      }
+    }
   }
 
-  return { userType: null, tenantId: userData?.tenant_id || null, roles: [], employeeId: null };
+  return { userType: null, tenantId: userData?.tenantId || userData?.tenant_id || null, roles: [], employeeId: null };
 }
 
 export function useCurrentUser(): CurrentUser {
-  const [supabaseUser, setSupabaseUser] = useState<User | null>(null);
+  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
 
   useEffect(() => {
-    const supabase = getSupabase();
-
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSupabaseUser(session?.user ?? null);
-    });
-
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSupabaseUser(session?.user ?? null);
-      if (!session?.user && typeof window !== "undefined") {
+    const auth = getFirebaseAuth();
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setFirebaseUser(u ?? null);
+      if (!u && typeof window !== "undefined") {
         sessionStorage.removeItem("employeeSession");
       }
     });
-
-    return () => subscription.unsubscribe();
+    return () => unsubscribe();
   }, []);
 
   const { data: resolved, isLoading } = useQuery<ResolvedUser>({
-    queryKey: ["current-user", supabaseUser?.id],
-    queryFn: () => resolveUserFromDb(supabaseUser!),
-    enabled: !!supabaseUser?.id,
+    queryKey: ["current-user", firebaseUser?.uid],
+    queryFn: () => resolveUserFromDb(firebaseUser!),
+    enabled: !!firebaseUser?.uid,
   });
 
   const userType = resolved?.userType ?? null;
@@ -112,8 +104,8 @@ export function useCurrentUser(): CurrentUser {
     tenantId,
     roles,
     employeeId,
-    firebaseUser: supabaseUser,
-    loading: supabaseUser === undefined ? true : isLoading,
+    firebaseUser,
+    loading: firebaseUser === undefined ? true : isLoading,
     can,
   };
 }

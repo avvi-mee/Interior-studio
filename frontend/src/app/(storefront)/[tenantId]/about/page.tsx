@@ -2,9 +2,9 @@
 
 import { use, useEffect, useState } from "react";
 import { Loader2, Target, Eye } from "lucide-react";
-import { db } from "@/lib/firebase";
+import { getDb } from "@/lib/firebase";
 import { doc, getDoc, collection, getDocs, query, orderBy } from "firebase/firestore";
-import { getTenantByStoreId } from "@/lib/firestoreHelpers";
+import { resolveTenant } from "@/lib/firestoreHelpers";
 import type { AboutUsContent, ThemeConfig, TeamMember } from "@/types/website";
 
 export default function AboutPage({ params }: { params: Promise<{ tenantId: string }> }) {
@@ -24,32 +24,50 @@ export default function AboutPage({ params }: { params: Promise<{ tenantId: stri
             }
 
             try {
-                const tenant = await getTenantByStoreId(storeSlug);
+                const db = getDb();
+                const tenant = await resolveTenant(storeSlug);
                 if (!tenant) {
                     if (isMounted) setLoading(false);
                     return;
                 }
 
                 if (isMounted) {
-                    const themeDoc = await getDoc(doc(db, "tenants", tenant.id, "theme", "config"));
-                    if (themeDoc.exists()) {
-                        setTheme(themeDoc.data() as ThemeConfig);
+                    // Fetch theme and about page configs in parallel
+                    const [themeSnap, aboutSnap, teamSnap] = await Promise.all([
+                        getDoc(doc(db, `tenants/${tenant.id}/theme/config`)),
+                        getDoc(doc(db, `tenants/${tenant.id}/pages/about`)),
+                        getDocs(query(
+                            collection(db, `tenants/${tenant.id}/teamMembers`),
+                            orderBy("sort_order", "asc")
+                        )),
+                    ]);
+
+                    if (themeSnap.exists()) {
+                        const data = themeSnap.data();
+                        setTheme((data?.content || data) as ThemeConfig);
                     }
 
-                    const aboutDoc = await getDoc(doc(db, "tenants", tenant.id, "pages", "about"));
-                    if (aboutDoc.exists()) {
-                        setAboutContent(aboutDoc.data() as AboutUsContent);
+                    if (aboutSnap.exists()) {
+                        const data = aboutSnap.data();
+                        setAboutContent((data?.content || data) as AboutUsContent);
                     }
 
-                    // Fetch Team Members
-                    const teamRef = collection(db, "tenants", tenant.id, "pages", "about", "teamMembers");
-                    const q = query(teamRef, orderBy("order", "asc"));
-                    const teamSnapshot = await getDocs(q);
-                    const teamData = teamSnapshot.docs.map(doc => ({
-                        id: doc.id,
-                        ...doc.data()
-                    })) as TeamMember[];
-                    setTeamMembers(teamData);
+                    // Map team members from snake_case DB columns to camelCase
+                    if (!teamSnap.empty) {
+                        setTeamMembers(teamSnap.docs.map((d) => {
+                            const row = d.data();
+                            return {
+                                id: d.id,
+                                name: row.name,
+                                role: row.role,
+                                bio: row.bio,
+                                imageUrl: row.image_url,
+                                linkedinUrl: row.social_links?.linkedin,
+                                instagramUrl: row.social_links?.instagram,
+                                order: row.sort_order,
+                            };
+                        }));
+                    }
                 }
             } catch (error) {
                 console.error("Error loading about page:", error);

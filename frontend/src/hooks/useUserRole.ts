@@ -2,8 +2,9 @@
 
 import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { getSupabase } from "@/lib/supabase";
-import type { User } from "@supabase/supabase-js";
+import { getFirebaseAuth, getDb } from "@/lib/firebase";
+import { onAuthStateChanged, type User } from "firebase/auth";
+import { doc, getDoc } from "firebase/firestore";
 
 export interface UserRoleData {
   uid: string;
@@ -18,42 +19,30 @@ export function useUserRole() {
   const [user, setUser] = useState<User | null>(null);
 
   useEffect(() => {
-    const supabase = getSupabase();
-
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null);
+    const auth = getFirebaseAuth();
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setUser(u ?? null);
     });
-
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null);
-    });
-
-    return () => subscription.unsubscribe();
+    return () => unsubscribe();
   }, []);
 
   const { data: roleData = null, isLoading } = useQuery<UserRoleData | null>({
-    queryKey: ["user-role", user?.id],
+    queryKey: ["user-role", user?.uid],
     queryFn: async () => {
-      const supabase = getSupabase();
-      const { data } = await supabase
-        .from("users")
-        .select("*")
-        .eq("id", user!.id)
-        .maybeSingle();
-
-      if (!data) return null;
+      const db = getDb();
+      const userDoc = await getDoc(doc(db, "users", user!.uid));
+      if (!userDoc.exists()) return null;
+      const data = userDoc.data();
       return {
-        uid: data.id,
+        uid: userDoc.id,
         email: data.email,
         role: data.role,
-        tenantId: data.tenant_id,
+        tenantId: data.tenantId || data.tenant_id,
         name: data.name,
         phone: data.phone,
       };
     },
-    enabled: !!user?.id,
+    enabled: !!user?.uid,
   });
 
   return { user, roleData, loading: !user ? true : isLoading };

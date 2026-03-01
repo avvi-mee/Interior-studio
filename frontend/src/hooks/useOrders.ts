@@ -2,21 +2,30 @@
 
 import { useCallback, useMemo } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { getSupabase } from "@/lib/supabase";
-import { useRealtimeQuery } from "@/lib/supabaseQuery";
+import { getDb } from "@/lib/firebase";
+import { useFirestoreQuery } from "@/lib/firestoreQuery";
+import {
+    collection,
+    doc,
+    query,
+    orderBy,
+    limit,
+    addDoc,
+    updateDoc,
+    serverTimestamp,
+    writeBatch,
+    type DocumentSnapshot,
+} from "firebase/firestore";
 
 // =============================================================================
-// v2 changes:
-//   - estimates table restructured: customer_info JSONB → typed columns
-//   - timeline_events → activity_logs
-//   - assigned_to_name removed (join to get names)
-//   - status enum: 'pending'→'draft', 'generated'→'sent'
-//   - Column selection instead of SELECT *
+// Firebase migration:
+//   - estimates → tenants/{tenantId}/estimates
+//   - activity_logs → tenants/{tenantId}/activityLogs
+//   - All fields are camelCase in Firestore
 // =============================================================================
 
 export interface Order {
     id: string;
-    // v2: typed columns from estimates
     customerName?: string;
     customerPhone?: string;
     customerEmail?: string;
@@ -57,89 +66,54 @@ export interface OrderStats {
     totalValue: number;
 }
 
-const ESTIMATE_COLS = "id,tenant_id,lead_id,customer_name,customer_email,customer_phone,customer_city,segment,plan,carpet_area,line_items,total_amount,status,assigned_to,pdf_url,valid_until,created_at,updated_at";
-
-function mapRowToOrder(row: any, activityLogs: any[] = []): Order {
+function mapDocToOrder(snap: DocumentSnapshot): Order {
+    const d = snap.data() ?? {};
     return {
-        id: row.id,
-        customerName: row.customer_name ?? undefined,
-        customerPhone: row.customer_phone ?? undefined,
-        customerEmail: row.customer_email ?? undefined,
-        customerCity: row.customer_city ?? undefined,
-        segment: row.segment ?? undefined,
-        plan: row.plan ?? undefined,
-        carpetArea: row.carpet_area ?? undefined,
-        lineItems: row.line_items ?? [],
-        totalAmount: row.total_amount ?? undefined,
-        status: row.status || "draft",
-        createdAt: row.created_at ?? undefined,
-        tenantId: row.tenant_id ?? "",
-        pdfUrl: row.pdf_url ?? undefined,
-        assignedTo: row.assigned_to ?? undefined,
-        leadId: row.lead_id ?? undefined,
-        validUntil: row.valid_until ?? undefined,
+        id: snap.id,
+        customerName: d.customerName ?? undefined,
+        customerPhone: d.customerPhone ?? undefined,
+        customerEmail: d.customerEmail ?? undefined,
+        customerCity: d.customerCity ?? undefined,
+        segment: d.segment ?? undefined,
+        plan: d.plan ?? undefined,
+        carpetArea: d.carpetArea ?? undefined,
+        lineItems: d.lineItems ?? [],
+        totalAmount: d.totalAmount ?? undefined,
+        status: d.status || "draft",
+        createdAt: d.createdAt ?? undefined,
+        tenantId: d.tenantId ?? "",
+        pdfUrl: d.pdfUrl ?? undefined,
+        assignedTo: d.assignedTo ?? undefined,
+        leadId: d.leadId ?? undefined,
+        validUntil: d.validUntil ?? undefined,
         // Legacy compat
-        clientName: row.customer_name ?? undefined,
-        clientPhone: row.customer_phone ?? undefined,
-        clientEmail: row.customer_email ?? undefined,
-        estimatedAmount: row.total_amount ?? undefined,
-        timeline: activityLogs.map((e: any) => ({
-            action: e.action ?? "",
-            summary: e.summary ?? "",
-            timestamp: e.created_at ?? null,
-            actorId: e.actor_id ?? undefined,
-        })),
+        clientName: d.customerName ?? undefined,
+        clientPhone: d.customerPhone ?? undefined,
+        clientEmail: d.customerEmail ?? undefined,
+        estimatedAmount: d.totalAmount ?? undefined,
+        timeline: [],
     };
 }
 
 export function useOrders(tenantId: string | null, storeId?: string | null) {
     const queryClient = useQueryClient();
     const qk = ["orders", tenantId, storeId] as const;
+    const db = getDb();
 
-    const { data: orders = [], isLoading: loading } = useRealtimeQuery<Order[]>({
+    const collectionRef = useMemo(
+        () =>
+            query(
+                collection(db, `tenants/${tenantId}/estimates`),
+                orderBy("createdAt", "desc"),
+                limit(200)
+            ),
+        [db, tenantId]
+    );
+
+    const { data: orders = [], isLoading: loading } = useFirestoreQuery<Order>({
         queryKey: qk,
-        queryFn: async () => {
-            const supabase = getSupabase();
-
-            const { data: estimatesData, error } = await supabase
-                .from("estimates")
-                .select(ESTIMATE_COLS)
-                .eq("tenant_id", tenantId!)
-                .order("created_at", { ascending: false });
-
-            if (error) throw error;
-
-            const rows = estimatesData ?? [];
-
-            // v2: Fetch activity logs (replaces timeline_events)
-            const estimateIds = rows.map((r: any) => r.id);
-            let activityMap: Record<string, any[]> = {};
-
-            if (estimateIds.length > 0) {
-                const { data: activityData } = await supabase
-                    .from("activity_logs")
-                    .select("entity_id,action,summary,actor_id,created_at")
-                    .eq("entity_type", "estimate")
-                    .in("entity_id", estimateIds)
-                    .order("created_at", { ascending: true });
-
-                if (activityData) {
-                    for (const event of activityData) {
-                        if (!activityMap[event.entity_id]) {
-                            activityMap[event.entity_id] = [];
-                        }
-                        activityMap[event.entity_id].push(event);
-                    }
-                }
-            }
-
-            return rows.map((row: any) =>
-                mapRowToOrder(row, activityMap[row.id] ?? [])
-            );
-        },
-        table: "estimates",
-        filter: `tenant_id=eq.${tenantId}`,
-        additionalTables: [{ table: "activity_logs" }],
+        collectionRef,
+        mapDoc: mapDocToOrder,
         enabled: !!tenantId,
     });
 
@@ -162,26 +136,22 @@ export function useOrders(tenantId: string | null, storeId?: string | null) {
         async (orderId: string, status: "draft" | "sent" | "approved" | "rejected") => {
             if (!tenantId) return false;
             try {
-                const supabase = getSupabase();
-
-                const { error: updateError } = await supabase
-                    .from("estimates")
-                    .update({ status })
-                    .eq("id", orderId);
-
-                if (updateError) {
-                    console.error("Error updating order status:", updateError);
-                    return false;
-                }
-
-                // v2: activity_logs instead of timeline_events
-                await supabase.from("activity_logs").insert({
-                    tenant_id: tenantId,
-                    entity_type: "estimate",
-                    entity_id: orderId,
+                // Atomic: estimate update + activity log
+                const batch = writeBatch(db);
+                batch.update(
+                    doc(db, `tenants/${tenantId}/estimates`, orderId),
+                    { status }
+                );
+                const logRef = doc(collection(db, `tenants/${tenantId}/activityLogs`));
+                batch.set(logRef, {
+                    tenantId,
+                    entityType: "estimate",
+                    entityId: orderId,
                     action: "status_changed",
                     summary: `Order status updated to ${status}`,
+                    createdAt: serverTimestamp(),
                 });
+                await batch.commit();
 
                 invalidate();
                 return true;
@@ -190,54 +160,39 @@ export function useOrders(tenantId: string | null, storeId?: string | null) {
                 return false;
             }
         },
-        [tenantId, invalidate]
+        [db, tenantId, invalidate]
     );
 
     const updateOrderDetails = useCallback(
         async (orderId: string, updates: Partial<Order>) => {
             if (!tenantId) return false;
             try {
-                const supabase = getSupabase();
-
                 const dbUpdates: Record<string, any> = {};
-                const fieldMap: Record<string, string> = {
-                    customerName: "customer_name",
-                    customerPhone: "customer_phone",
-                    customerEmail: "customer_email",
-                    customerCity: "customer_city",
-                    totalAmount: "total_amount",
-                    carpetArea: "carpet_area",
-                    lineItems: "line_items",
-                    assignedTo: "assigned_to",
-                    pdfUrl: "pdf_url",
-                    validUntil: "valid_until",
-                    leadId: "lead_id",
-                };
 
                 for (const [key, value] of Object.entries(updates)) {
                     if (key === "id" || key === "timeline") continue;
-                    const dbKey = fieldMap[key] || key;
-                    dbUpdates[dbKey] = value;
+                    // Skip legacy alias fields to avoid duplication
+                    if (key === "clientName" || key === "clientPhone" || key === "clientEmail" || key === "estimatedAmount") continue;
+                    dbUpdates[key] = value;
                 }
 
-                const { error: updateError } = await supabase
-                    .from("estimates")
-                    .update(dbUpdates)
-                    .eq("id", orderId);
-
-                if (updateError) {
-                    console.error("Error updating order details:", updateError);
-                    return false;
-                }
+                await updateDoc(
+                    doc(db, `tenants/${tenantId}/estimates`, orderId),
+                    dbUpdates
+                );
 
                 if (updates.assignedTo) {
-                    await supabase.from("activity_logs").insert({
-                        tenant_id: tenantId,
-                        entity_type: "estimate",
-                        entity_id: orderId,
-                        action: "assigned",
-                        summary: `Order assigned`,
-                    });
+                    await addDoc(
+                        collection(db, `tenants/${tenantId}/activityLogs`),
+                        {
+                            tenantId,
+                            entityType: "estimate",
+                            entityId: orderId,
+                            action: "assigned",
+                            summary: `Order assigned`,
+                            createdAt: serverTimestamp(),
+                        }
+                    );
                 }
 
                 invalidate();
@@ -247,7 +202,7 @@ export function useOrders(tenantId: string | null, storeId?: string | null) {
                 return false;
             }
         },
-        [tenantId, invalidate]
+        [db, tenantId, invalidate]
     );
 
     return { orders, stats, loading, updateOrderStatus, updateOrderDetails };

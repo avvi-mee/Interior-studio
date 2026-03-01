@@ -1,7 +1,9 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
-import { getSupabase } from "@/lib/supabase";
+import { useMemo } from "react";
+import { getDb } from "@/lib/firebase";
+import { collection, query } from "firebase/firestore";
+import { useFirestoreQuery } from "@/lib/firestoreQuery";
 
 export interface PlatformStats {
   totalCompanies: number;
@@ -25,52 +27,76 @@ const EMPTY: PlatformStats = {
   loading: true,
 };
 
+interface TenantRow {
+  id: string;
+  status: string;
+  activatedAt?: string;
+  createdAt?: string;
+}
+
+function mapDocToTenantRow(snap: any): TenantRow {
+  const data = snap.data() || {};
+  return {
+    id: snap.id,
+    status: data.status || "",
+    activatedAt: data.activatedAt || data.activated_at || undefined,
+    createdAt: data.createdAt || data.created_at || undefined,
+  };
+}
+
 export function usePlatformStats(): PlatformStats {
-  const { data, isLoading } = useQuery({
+  const db = getDb();
+
+  const tenantsQuery = useMemo(() => query(collection(db, "tenants")), [db]);
+
+  const { data: companies = [], isLoading } = useFirestoreQuery<TenantRow>({
     queryKey: ["platform-stats"],
-    queryFn: async () => {
-      const supabase = getSupabase();
-      const { data, error } = await supabase
-        .from("tenants")
-        .select("id,status,activated_at,created_at");
-
-      if (error) throw error;
-
-      const companies = data ?? [];
-      const now = new Date();
-      const startOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-
-      const totalCompanies = companies.filter((c: any) => c.status !== "rejected").length;
-      const activeCompanies = companies.filter((c: any) => c.status === "active" && c.activated_at).length;
-
-      const companiesLastMonth = companies.filter((c: any) => {
-        if (!c.created_at) return false;
-        return new Date(c.created_at) < startOfThisMonth;
-      }).length;
-
-      const companiesThisMonth = companies.filter((c: any) => {
-        if (!c.created_at) return false;
-        return new Date(c.created_at) >= startOfThisMonth;
-      }).length;
-
-      const growthRate = companiesLastMonth > 0
-        ? ((totalCompanies - companiesLastMonth) / companiesLastMonth) * 100
-        : totalCompanies > 0 ? 100 : 0;
-
-      return {
-        totalCompanies,
-        activeCompanies,
-        platformRevenue: 0,
-        growthRate,
-        companiesLastMonth,
-        companiesThisMonth,
-        revenueLastMonth: 0,
-        loading: false,
-      };
-    },
-    staleTime: 60 * 1000, // 1 minute (was polling every 60s)
-    refetchInterval: 60 * 1000,
+    collectionRef: tenantsQuery,
+    mapDoc: mapDocToTenantRow,
+    staleTime: 60 * 1000,
   });
 
-  return data ?? { ...EMPTY, loading: isLoading };
+  const stats = useMemo<PlatformStats>(() => {
+    if (companies.length === 0 && isLoading) {
+      return { ...EMPTY, loading: true };
+    }
+
+    const now = new Date();
+    const startOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const totalCompanies = companies.filter((c) => c.status !== "rejected").length;
+    const activeCompanies = companies.filter(
+      (c) => c.status === "active" && c.activatedAt
+    ).length;
+
+    const companiesLastMonth = companies.filter((c) => {
+      if (!c.createdAt) return false;
+      return new Date(c.createdAt) < startOfThisMonth;
+    }).length;
+
+    const companiesThisMonth = companies.filter((c) => {
+      if (!c.createdAt) return false;
+      return new Date(c.createdAt) >= startOfThisMonth;
+    }).length;
+
+    const growthRate =
+      companiesLastMonth > 0
+        ? ((totalCompanies - companiesLastMonth) / companiesLastMonth) * 100
+        : totalCompanies > 0
+          ? 100
+          : 0;
+
+    return {
+      totalCompanies,
+      activeCompanies,
+      platformRevenue: 0,
+      growthRate,
+      companiesLastMonth,
+      companiesThisMonth,
+      revenueLastMonth: 0,
+      loading: false,
+    };
+  }, [companies, isLoading]);
+
+  return stats;
 }

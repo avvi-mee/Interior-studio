@@ -2,8 +2,20 @@
 
 import { useState, useCallback, useMemo } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { getSupabase } from "@/lib/supabase";
-import { useRealtimeQuery } from "@/lib/supabaseQuery";
+import { getDb } from "@/lib/firebase";
+import { useFirestoreQuery } from "@/lib/firestoreQuery";
+import { uploadImage as uploadToStorage } from "@/lib/storageHelpers";
+import {
+    collection,
+    doc,
+    query,
+    orderBy,
+    addDoc,
+    updateDoc,
+    deleteDoc,
+    serverTimestamp,
+    type DocumentSnapshot,
+} from "firebase/firestore";
 
 export interface PageSection {
     id: string;
@@ -27,39 +39,39 @@ export interface WebsitePage {
     updatedAt?: any;
 }
 
+function mapDocToPage(snap: DocumentSnapshot): WebsitePage {
+    const d = snap.data() ?? {};
+    return {
+        id: snap.id,
+        slug: d.slug ?? "",
+        title: d.title ?? "",
+        isPublished: d.isPublished ?? false,
+        order: d.sortOrder ?? 0,
+        sections: d.sections ?? [],
+        createdAt: d.createdAt,
+        updatedAt: d.updatedAt,
+    };
+}
+
 export function useWebsitePages(tenantId: string | null) {
     const queryClient = useQueryClient();
     const qk = ["website-pages", tenantId] as const;
     const [saving, setSaving] = useState(false);
+    const db = getDb();
 
-    const { data: pages = [], isLoading: loading } = useRealtimeQuery<WebsitePage[]>({
+    const collectionRef = useMemo(
+        () =>
+            query(
+                collection(db, `tenants/${tenantId}/customPages`),
+                orderBy("sortOrder", "asc")
+            ),
+        [db, tenantId]
+    );
+
+    const { data: pages = [], isLoading: loading } = useFirestoreQuery<WebsitePage>({
         queryKey: qk,
-        queryFn: async () => {
-            const supabase = getSupabase();
-            const { data, error } = await supabase
-                .from("custom_pages")
-                .select("*")
-                .eq("tenant_id", tenantId!)
-                .order("sort_order", { ascending: true });
-
-            if (error) {
-                console.error("Error fetching pages:", error);
-                return [];
-            }
-
-            return (data ?? []).map((row: any): WebsitePage => ({
-                id: row.id,
-                slug: row.slug ?? "",
-                title: row.title ?? "",
-                isPublished: row.is_published ?? false,
-                order: row.sort_order ?? 0,
-                sections: row.sections ?? [],
-                createdAt: row.created_at,
-                updatedAt: row.updated_at,
-            }));
-        },
-        table: "custom_pages",
-        filter: `tenant_id=eq.${tenantId}`,
+        collectionRef,
+        mapDoc: mapDocToPage,
         enabled: !!tenantId,
     });
 
@@ -74,23 +86,22 @@ export function useWebsitePages(tenantId: string | null) {
 
         setSaving(true);
         try {
-            const supabase = getSupabase();
-            const { data, error } = await supabase
-                .from("custom_pages")
-                .insert({
-                    tenant_id: tenantId,
+            const docRef = await addDoc(
+                collection(db, `tenants/${tenantId}/customPages`),
+                {
+                    tenantId,
                     title,
                     slug: slug.toLowerCase().replace(/\s+/g, "-"),
-                    is_published: false,
-                    sort_order: pages.length,
+                    isPublished: false,
+                    sortOrder: pages.length,
                     sections: [],
-                })
-                .select("id")
-                .single();
+                    createdAt: serverTimestamp(),
+                    updatedAt: serverTimestamp(),
+                }
+            );
 
-            if (error) throw error;
             invalidate();
-            return data.id;
+            return docRef.id;
         } catch (error) {
             console.error("Error creating page:", error);
             return null;
@@ -105,20 +116,19 @@ export function useWebsitePages(tenantId: string | null) {
 
         setSaving(true);
         try {
-            const supabase = getSupabase();
             const dbUpdates: Record<string, any> = {};
             if (updates.title !== undefined) dbUpdates.title = updates.title;
             if (updates.slug !== undefined) dbUpdates.slug = updates.slug;
-            if (updates.isPublished !== undefined) dbUpdates.is_published = updates.isPublished;
-            if (updates.order !== undefined) dbUpdates.sort_order = updates.order;
+            if (updates.isPublished !== undefined) dbUpdates.isPublished = updates.isPublished;
+            if (updates.order !== undefined) dbUpdates.sortOrder = updates.order;
             if (updates.sections !== undefined) dbUpdates.sections = updates.sections;
+            dbUpdates.updatedAt = serverTimestamp();
 
-            const { error } = await supabase
-                .from("custom_pages")
-                .update(dbUpdates)
-                .eq("id", pageId);
+            await updateDoc(
+                doc(db, `tenants/${tenantId}/customPages`, pageId),
+                dbUpdates
+            );
 
-            if (error) throw error;
             invalidate();
             return true;
         } catch (error) {
@@ -135,13 +145,8 @@ export function useWebsitePages(tenantId: string | null) {
 
         setSaving(true);
         try {
-            const supabase = getSupabase();
-            const { error } = await supabase
-                .from("custom_pages")
-                .delete()
-                .eq("id", pageId);
+            await deleteDoc(doc(db, `tenants/${tenantId}/customPages`, pageId));
 
-            if (error) throw error;
             invalidate();
             return true;
         } catch (error) {
@@ -209,13 +214,12 @@ export function useWebsitePages(tenantId: string | null) {
 
         setSaving(true);
         try {
-            const supabase = getSupabase();
             await Promise.all(
                 reorderedPages.map((page, index) =>
-                    supabase
-                        .from("custom_pages")
-                        .update({ sort_order: index })
-                        .eq("id", page.id)
+                    updateDoc(
+                        doc(db, `tenants/${tenantId}/customPages`, page.id),
+                        { sortOrder: index }
+                    )
                 )
             );
             invalidate();
@@ -228,24 +232,12 @@ export function useWebsitePages(tenantId: string | null) {
         }
     };
 
-    // Upload image for section (uses Supabase Storage)
+    // Upload image for section (uses Firebase Storage)
     const uploadSectionImage = async (file: File, pageId: string): Promise<string | null> => {
         if (!tenantId) return null;
 
         try {
-            const supabase = getSupabase();
-            const path = `tenants/${tenantId}/pages/${pageId}/${Date.now()}_${file.name}`;
-            const { error: uploadError } = await supabase.storage
-                .from("tenant-assets")
-                .upload(path, file);
-
-            if (uploadError) throw uploadError;
-
-            const { data: urlData } = supabase.storage
-                .from("tenant-assets")
-                .getPublicUrl(path);
-
-            return urlData.publicUrl;
+            return await uploadToStorage(file, tenantId, "pages");
         } catch (error) {
             console.error("Error uploading section image:", error);
             return null;

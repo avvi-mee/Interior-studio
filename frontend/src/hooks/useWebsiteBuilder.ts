@@ -1,9 +1,22 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { getSupabase } from "@/lib/supabase";
-import { useRealtimeQuery } from "@/lib/supabaseQuery";
+import { getDb } from "@/lib/firebase";
+import {
+    collection,
+    doc,
+    query,
+    orderBy,
+    getDocs,
+    getDoc,
+    addDoc,
+    setDoc,
+    updateDoc,
+    deleteDoc,
+    serverTimestamp,
+} from "firebase/firestore";
+import { useFirestoreDoc, useFirestoreQuery } from "@/lib/firestoreQuery";
 import type {
     BrandConfig,
     ThemeConfig,
@@ -34,53 +47,32 @@ export const DEFAULT_SECTION_LAYOUT: HomeSectionConfig[] = [
 ];
 
 // ============================================
-// PAGE CONFIG HELPERS (tenant_page_configs)
+// PAGE CONFIG HELPERS (Firestore single docs)
 // ============================================
 
-async function fetchPageContent<T>(tenantId: string, pageType: string, defaultValue: T): Promise<T> {
-    const supabase = getSupabase();
-    const { data, error } = await supabase
-        .from("tenant_page_configs")
-        .select("content")
-        .eq("tenant_id", tenantId)
-        .eq("page_type", pageType)
-        .maybeSingle();
-
-    if (error) {
-        console.error(`Error fetching ${pageType} config:`, error);
-        return defaultValue;
-    }
-    return data?.content ? (data.content as T) : defaultValue;
+async function fetchPageDoc<T>(tenantId: string, collPath: string, docId: string, defaultValue: T): Promise<T> {
+    const db = getDb();
+    const snap = await getDoc(doc(db, `tenants/${tenantId}/${collPath}`, docId));
+    if (!snap.exists()) return defaultValue;
+    return (snap.data() as T) ?? defaultValue;
 }
 
-async function savePageContent(tenantId: string, pageType: string, updates: Record<string, any>): Promise<boolean> {
-    const supabase = getSupabase();
-    const { data: existing } = await supabase
-        .from("tenant_page_configs")
-        .select("id, content")
-        .eq("tenant_id", tenantId)
-        .eq("page_type", pageType)
-        .maybeSingle();
+async function savePageDoc(tenantId: string, collPath: string, docId: string, updates: Record<string, any>): Promise<boolean> {
+    const db = getDb();
+    const docRef = doc(db, `tenants/${tenantId}/${collPath}`, docId);
+    const snap = await getDoc(docRef);
 
-    const newContent = existing ? { ...existing.content, ...updates } : { ...updates };
-
-    if (existing) {
-        const { error } = await supabase
-            .from("tenant_page_configs")
-            .update({ content: newContent })
-            .eq("id", existing.id);
-        if (error) throw error;
+    if (snap.exists()) {
+        await updateDoc(docRef, updates);
     } else {
-        const { error } = await supabase
-            .from("tenant_page_configs")
-            .insert({ tenant_id: tenantId, page_type: pageType, content: newContent });
-        if (error) throw error;
+        await setDoc(docRef, updates);
     }
     return true;
 }
 
 // ============================================
 // BRAND HOOK
+// tenants/{tenantId}/brand/config
 // ============================================
 const DEFAULT_BRAND: BrandConfig = {
     brandName: "",
@@ -95,15 +87,21 @@ export function useBrand(tenantId: string | null) {
     const queryClient = useQueryClient();
     const qk = ["website-builder-brand", tenantId] as const;
     const [saving, setSaving] = useState(false);
+    const db = getDb();
 
-    const { data: brand = null, isLoading: loading } = useRealtimeQuery<BrandConfig | null>({
+    const brandDocRef = useMemo(() => {
+        if (!tenantId) return null;
+        return doc(db, `tenants/${tenantId}/brand`, "config");
+    }, [db, tenantId]);
+
+    const { data: brand = null, isLoading: loading } = useFirestoreDoc<BrandConfig>({
         queryKey: qk,
-        queryFn: async () => {
-            return fetchPageContent<BrandConfig>(tenantId!, "brand", DEFAULT_BRAND);
+        docRef: brandDocRef!,
+        mapDoc: (snap) => {
+            if (!snap.exists()) return DEFAULT_BRAND;
+            return { ...DEFAULT_BRAND, ...snap.data() } as BrandConfig;
         },
-        table: "tenant_page_configs",
-        filter: `tenant_id=eq.${tenantId}`,
-        enabled: !!tenantId,
+        enabled: !!tenantId && !!brandDocRef,
     });
 
     const invalidate = useCallback(
@@ -116,7 +114,7 @@ export function useBrand(tenantId: string | null) {
 
         setSaving(true);
         try {
-            await savePageContent(tenantId, "brand", updates);
+            await savePageDoc(tenantId, "brand", "config", updates);
             invalidate();
             return true;
         } catch (error) {
@@ -166,6 +164,7 @@ export function useBrand(tenantId: string | null) {
 
 // ============================================
 // THEME HOOK
+// tenants/{tenantId}/theme/config
 // ============================================
 const DEFAULT_THEME: ThemeConfig = {
     primaryColor: "#ea580c",
@@ -180,15 +179,21 @@ export function useTheme(tenantId: string | null) {
     const queryClient = useQueryClient();
     const qk = ["website-builder-theme", tenantId] as const;
     const [saving, setSaving] = useState(false);
+    const db = getDb();
 
-    const { data: theme = null, isLoading: loading } = useRealtimeQuery<ThemeConfig | null>({
+    const themeDocRef = useMemo(() => {
+        if (!tenantId) return null;
+        return doc(db, `tenants/${tenantId}/theme`, "config");
+    }, [db, tenantId]);
+
+    const { data: theme = null, isLoading: loading } = useFirestoreDoc<ThemeConfig>({
         queryKey: qk,
-        queryFn: async () => {
-            return fetchPageContent<ThemeConfig>(tenantId!, "theme", DEFAULT_THEME);
+        docRef: themeDocRef!,
+        mapDoc: (snap) => {
+            if (!snap.exists()) return DEFAULT_THEME;
+            return { ...DEFAULT_THEME, ...snap.data() } as ThemeConfig;
         },
-        table: "tenant_page_configs",
-        filter: `tenant_id=eq.${tenantId}`,
-        enabled: !!tenantId,
+        enabled: !!tenantId && !!themeDocRef,
     });
 
     const invalidate = useCallback(
@@ -201,7 +206,7 @@ export function useTheme(tenantId: string | null) {
 
         setSaving(true);
         try {
-            await savePageContent(tenantId, "theme", updates);
+            await savePageDoc(tenantId, "theme", "config", updates);
             invalidate();
             return true;
         } catch (error) {
@@ -217,6 +222,7 @@ export function useTheme(tenantId: string | null) {
 
 // ============================================
 // HOME PAGE HOOK
+// tenants/{tenantId}/pages/home
 // ============================================
 const DEFAULT_HOME: HomePageContent = {
     heroSlides: [],
@@ -240,15 +246,21 @@ export function useHomePage(tenantId: string | null) {
     const queryClient = useQueryClient();
     const qk = ["website-builder-home", tenantId] as const;
     const [saving, setSaving] = useState(false);
+    const db = getDb();
 
-    const { data: homeContent = null, isLoading: loading } = useRealtimeQuery<HomePageContent | null>({
+    const homeDocRef = useMemo(() => {
+        if (!tenantId) return null;
+        return doc(db, `tenants/${tenantId}/pages`, "home");
+    }, [db, tenantId]);
+
+    const { data: homeContent = null, isLoading: loading } = useFirestoreDoc<HomePageContent>({
         queryKey: qk,
-        queryFn: async () => {
-            return fetchPageContent<HomePageContent>(tenantId!, "home", DEFAULT_HOME);
+        docRef: homeDocRef!,
+        mapDoc: (snap) => {
+            if (!snap.exists()) return DEFAULT_HOME;
+            return { ...DEFAULT_HOME, ...snap.data() } as HomePageContent;
         },
-        table: "tenant_page_configs",
-        filter: `tenant_id=eq.${tenantId}`,
-        enabled: !!tenantId,
+        enabled: !!tenantId && !!homeDocRef,
     });
 
     const invalidate = useCallback(
@@ -263,7 +275,7 @@ export function useHomePage(tenantId: string | null) {
 
         setSaving(true);
         try {
-            await savePageContent(tenantId, "home", updates);
+            await savePageDoc(tenantId, "pages", "home", updates);
             invalidate();
             return true;
         } catch (error) {
@@ -512,6 +524,7 @@ export function useHomePage(tenantId: string | null) {
 
 // ============================================
 // CUSTOM PAGES HOOK
+// tenants/{tenantId}/customPages
 // ============================================
 const RESERVED_SLUGS = [
     "about", "about-us", "portfolio", "testimonials", "contact",
@@ -519,46 +532,40 @@ const RESERVED_SLUGS = [
     "forgot-password", "store", "services", "admin",
 ];
 
-function mapRowToCustomPage(row: any): CustomPage {
-    return {
-        id: row.id,
-        title: row.title || "",
-        slug: row.slug || "",
-        heading: row.heading || "",
-        description: row.description || "",
-        imageUrl: row.image_url || "",
-        showInNav: row.show_in_nav ?? false,
-        isPublished: row.is_published ?? false,
-        order: row.sort_order ?? 0,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-    };
-}
-
 export function useCustomPages(tenantId: string | null) {
     const queryClient = useQueryClient();
     const qk = ["website-builder-custom-pages", tenantId] as const;
     const [saving, setSaving] = useState(false);
+    const db = getDb();
 
-    const { data: customPages = [], isLoading: loading } = useRealtimeQuery<CustomPage[]>({
+    const customPagesQuery = useMemo(() => {
+        if (!tenantId) return null;
+        return query(
+            collection(db, `tenants/${tenantId}/customPages`),
+            orderBy("sortOrder", "asc")
+        );
+    }, [db, tenantId]);
+
+    const { data: customPages = [], isLoading: loading } = useFirestoreQuery<CustomPage>({
         queryKey: qk,
-        queryFn: async () => {
-            const supabase = getSupabase();
-            const { data, error } = await supabase
-                .from("custom_pages")
-                .select("*")
-                .eq("tenant_id", tenantId!)
-                .order("sort_order", { ascending: true });
-
-            if (error) {
-                console.error("Error fetching custom pages:", error);
-                return [];
-            }
-            return (data || []).map(mapRowToCustomPage);
+        collectionRef: customPagesQuery!,
+        mapDoc: (snap) => {
+            const data = snap.data() || {};
+            return {
+                id: snap.id,
+                title: data.title || "",
+                slug: data.slug || "",
+                heading: data.heading || "",
+                description: data.description || "",
+                imageUrl: data.imageUrl || "",
+                showInNav: data.showInNav ?? false,
+                isPublished: data.isPublished ?? false,
+                order: data.sortOrder ?? 0,
+                createdAt: data.createdAt,
+                updatedAt: data.updatedAt,
+            } as CustomPage;
         },
-        table: "custom_pages",
-        filter: `tenant_id=eq.${tenantId}`,
-        enabled: !!tenantId,
+        enabled: !!tenantId && !!customPagesQuery,
     });
 
     const invalidate = useCallback(
@@ -589,21 +596,19 @@ export function useCustomPages(tenantId: string | null) {
 
         setSaving(true);
         try {
-            const supabase = getSupabase();
-            const { error } = await supabase
-                .from("custom_pages")
-                .insert({
-                    tenant_id: tenantId,
-                    title: page.title,
-                    slug: page.slug,
-                    heading: page.heading || null,
-                    description: page.description || null,
-                    image_url: page.imageUrl || null,
-                    show_in_nav: page.showInNav ?? false,
-                    is_published: page.isPublished ?? false,
-                    sort_order: customPages.length,
-                });
-            if (error) throw error;
+            const db = getDb();
+            await addDoc(collection(db, `tenants/${tenantId}/customPages`), {
+                title: page.title,
+                slug: page.slug,
+                heading: page.heading || null,
+                description: page.description || null,
+                imageUrl: page.imageUrl || null,
+                showInNav: page.showInNav ?? false,
+                isPublished: page.isPublished ?? false,
+                sortOrder: customPages.length,
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+            });
             invalidate();
             return true;
         } catch (error) {
@@ -624,22 +629,20 @@ export function useCustomPages(tenantId: string | null) {
 
         setSaving(true);
         try {
-            const supabase = getSupabase();
-            const dbUpdates: Record<string, any> = {};
+            const db = getDb();
+            const dbUpdates: Record<string, any> = {
+                updatedAt: serverTimestamp(),
+            };
             if (updates.title !== undefined) dbUpdates.title = updates.title;
             if (updates.slug !== undefined) dbUpdates.slug = updates.slug;
             if (updates.heading !== undefined) dbUpdates.heading = updates.heading;
             if (updates.description !== undefined) dbUpdates.description = updates.description;
-            if (updates.imageUrl !== undefined) dbUpdates.image_url = updates.imageUrl;
-            if (updates.showInNav !== undefined) dbUpdates.show_in_nav = updates.showInNav;
-            if (updates.isPublished !== undefined) dbUpdates.is_published = updates.isPublished;
-            if (updates.order !== undefined) dbUpdates.sort_order = updates.order;
+            if (updates.imageUrl !== undefined) dbUpdates.imageUrl = updates.imageUrl;
+            if (updates.showInNav !== undefined) dbUpdates.showInNav = updates.showInNav;
+            if (updates.isPublished !== undefined) dbUpdates.isPublished = updates.isPublished;
+            if (updates.order !== undefined) dbUpdates.sortOrder = updates.order;
 
-            const { error } = await supabase
-                .from("custom_pages")
-                .update(dbUpdates)
-                .eq("id", pageId);
-            if (error) throw error;
+            await updateDoc(doc(db, `tenants/${tenantId}/customPages`, pageId), dbUpdates);
             invalidate();
             return true;
         } catch (error) {
@@ -655,12 +658,8 @@ export function useCustomPages(tenantId: string | null) {
 
         setSaving(true);
         try {
-            const supabase = getSupabase();
-            const { error } = await supabase
-                .from("custom_pages")
-                .delete()
-                .eq("id", pageId);
-            if (error) throw error;
+            const db = getDb();
+            await deleteDoc(doc(db, `tenants/${tenantId}/customPages`, pageId));
             invalidate();
             return true;
         } catch (error) {
@@ -712,47 +711,42 @@ export function useCustomPages(tenantId: string | null) {
 
 // ============================================
 // PORTFOLIO HOOK
+// tenants/{tenantId}/portfolio
 // ============================================
-function mapRowToPortfolio(row: any): PortfolioProject {
-    return {
-        id: row.id,
-        title: row.title || "",
-        category: row.category || "residential",
-        description: row.description || "",
-        beforeImageUrl: row.before_image_url || "",
-        afterImageUrl: row.after_image_url || row.image_url || "",
-        imageStyle: row.image_style || "single",
-        location: row.location || "",
-        showOnHomepage: row.show_on_homepage ?? false,
-        order: row.sort_order ?? 0,
-        createdAt: row.created_at,
-    };
-}
-
 export function usePortfolio(tenantId: string | null) {
     const queryClient = useQueryClient();
     const qk = ["website-builder-portfolio", tenantId] as const;
     const [saving, setSaving] = useState(false);
+    const db = getDb();
 
-    const { data: projects = [], isLoading: loading } = useRealtimeQuery<PortfolioProject[]>({
+    const portfolioQuery = useMemo(() => {
+        if (!tenantId) return null;
+        return query(
+            collection(db, `tenants/${tenantId}/portfolio`),
+            orderBy("sortOrder", "asc")
+        );
+    }, [db, tenantId]);
+
+    const { data: projects = [], isLoading: loading } = useFirestoreQuery<PortfolioProject>({
         queryKey: qk,
-        queryFn: async () => {
-            const supabase = getSupabase();
-            const { data, error } = await supabase
-                .from("portfolio_projects")
-                .select("*")
-                .eq("tenant_id", tenantId!)
-                .order("sort_order", { ascending: true });
-
-            if (error) {
-                console.error("Error fetching portfolio:", error);
-                return [];
-            }
-            return (data || []).map(mapRowToPortfolio);
+        collectionRef: portfolioQuery!,
+        mapDoc: (snap) => {
+            const data = snap.data() || {};
+            return {
+                id: snap.id,
+                title: data.title || "",
+                category: data.category || "residential",
+                description: data.description || "",
+                beforeImageUrl: data.beforeImageUrl || "",
+                afterImageUrl: data.afterImageUrl || data.imageUrl || "",
+                imageStyle: data.imageStyle || "single",
+                location: data.location || "",
+                showOnHomepage: data.showOnHomepage ?? false,
+                order: data.sortOrder ?? 0,
+                createdAt: data.createdAt,
+            } as PortfolioProject;
         },
-        table: "portfolio_projects",
-        filter: `tenant_id=eq.${tenantId}`,
-        enabled: !!tenantId,
+        enabled: !!tenantId && !!portfolioQuery,
     });
 
     const invalidate = useCallback(
@@ -767,23 +761,20 @@ export function usePortfolio(tenantId: string | null) {
 
         setSaving(true);
         try {
-            const supabase = getSupabase();
-            const { error } = await supabase
-                .from("portfolio_projects")
-                .insert({
-                    tenant_id: tenantId,
-                    title: project.title,
-                    category: project.category,
-                    description: project.description || null,
-                    image_url: project.afterImageUrl || null,
-                    before_image_url: project.beforeImageUrl || null,
-                    after_image_url: project.afterImageUrl || null,
-                    image_style: project.imageStyle || "single",
-                    location: project.location || null,
-                    show_on_homepage: project.showOnHomepage ?? false,
-                    sort_order: projects.length,
-                });
-            if (error) throw error;
+            const db = getDb();
+            await addDoc(collection(db, `tenants/${tenantId}/portfolio`), {
+                title: project.title,
+                category: project.category,
+                description: project.description || null,
+                imageUrl: project.afterImageUrl || null,
+                beforeImageUrl: project.beforeImageUrl || null,
+                afterImageUrl: project.afterImageUrl || null,
+                imageStyle: project.imageStyle || "single",
+                location: project.location || null,
+                showOnHomepage: project.showOnHomepage ?? false,
+                sortOrder: projects.length,
+                createdAt: serverTimestamp(),
+            });
             invalidate();
             return true;
         } catch (error) {
@@ -802,26 +793,22 @@ export function usePortfolio(tenantId: string | null) {
 
         setSaving(true);
         try {
-            const supabase = getSupabase();
+            const db = getDb();
             const dbUpdates: Record<string, any> = {};
             if (updates.title !== undefined) dbUpdates.title = updates.title;
             if (updates.category !== undefined) dbUpdates.category = updates.category;
             if (updates.description !== undefined) dbUpdates.description = updates.description;
-            if (updates.beforeImageUrl !== undefined) dbUpdates.before_image_url = updates.beforeImageUrl;
+            if (updates.beforeImageUrl !== undefined) dbUpdates.beforeImageUrl = updates.beforeImageUrl;
             if (updates.afterImageUrl !== undefined) {
-                dbUpdates.after_image_url = updates.afterImageUrl;
-                dbUpdates.image_url = updates.afterImageUrl;
+                dbUpdates.afterImageUrl = updates.afterImageUrl;
+                dbUpdates.imageUrl = updates.afterImageUrl;
             }
-            if (updates.imageStyle !== undefined) dbUpdates.image_style = updates.imageStyle;
+            if (updates.imageStyle !== undefined) dbUpdates.imageStyle = updates.imageStyle;
             if (updates.location !== undefined) dbUpdates.location = updates.location;
-            if (updates.showOnHomepage !== undefined) dbUpdates.show_on_homepage = updates.showOnHomepage;
-            if (updates.order !== undefined) dbUpdates.sort_order = updates.order;
+            if (updates.showOnHomepage !== undefined) dbUpdates.showOnHomepage = updates.showOnHomepage;
+            if (updates.order !== undefined) dbUpdates.sortOrder = updates.order;
 
-            const { error } = await supabase
-                .from("portfolio_projects")
-                .update(dbUpdates)
-                .eq("id", projectId);
-            if (error) throw error;
+            await updateDoc(doc(db, `tenants/${tenantId}/portfolio`, projectId), dbUpdates);
             invalidate();
             return true;
         } catch (error) {
@@ -837,12 +824,8 @@ export function usePortfolio(tenantId: string | null) {
 
         setSaving(true);
         try {
-            const supabase = getSupabase();
-            const { error } = await supabase
-                .from("portfolio_projects")
-                .delete()
-                .eq("id", projectId);
-            if (error) throw error;
+            const db = getDb();
+            await deleteDoc(doc(db, `tenants/${tenantId}/portfolio`, projectId));
             invalidate();
             return true;
         } catch (error) {
@@ -892,46 +875,41 @@ export function usePortfolio(tenantId: string | null) {
 
 // ============================================
 // TESTIMONIALS HOOK
+// tenants/{tenantId}/testimonials
 // ============================================
-function mapRowToTestimonial(row: any): Testimonial {
-    return {
-        id: row.id,
-        clientName: row.client_name || "",
-        clientTitle: row.client_title || "",
-        location: row.location,
-        clientImageUrl: row.client_image_url || "",
-        reviewText: row.review_text || "",
-        rating: row.rating || 5,
-        showOnHomepage: row.show_on_homepage ?? false,
-        order: row.sort_order ?? 0,
-        createdAt: row.created_at,
-    };
-}
-
 export function useTestimonials(tenantId: string | null) {
     const queryClient = useQueryClient();
     const qk = ["website-builder-testimonials", tenantId] as const;
     const [saving, setSaving] = useState(false);
+    const db = getDb();
 
-    const { data: testimonials = [], isLoading: loading } = useRealtimeQuery<Testimonial[]>({
+    const testimonialsQuery = useMemo(() => {
+        if (!tenantId) return null;
+        return query(
+            collection(db, `tenants/${tenantId}/testimonials`),
+            orderBy("sortOrder", "asc")
+        );
+    }, [db, tenantId]);
+
+    const { data: testimonials = [], isLoading: loading } = useFirestoreQuery<Testimonial>({
         queryKey: qk,
-        queryFn: async () => {
-            const supabase = getSupabase();
-            const { data, error } = await supabase
-                .from("testimonials")
-                .select("*")
-                .eq("tenant_id", tenantId!)
-                .order("sort_order", { ascending: true });
-
-            if (error) {
-                console.error("Error fetching testimonials:", error);
-                return [];
-            }
-            return (data || []).map(mapRowToTestimonial);
+        collectionRef: testimonialsQuery!,
+        mapDoc: (snap) => {
+            const data = snap.data() || {};
+            return {
+                id: snap.id,
+                clientName: data.clientName || "",
+                clientTitle: data.clientTitle || "",
+                location: data.location,
+                clientImageUrl: data.clientImageUrl || "",
+                reviewText: data.reviewText || "",
+                rating: data.rating || 5,
+                showOnHomepage: data.showOnHomepage ?? false,
+                order: data.sortOrder ?? 0,
+                createdAt: data.createdAt,
+            } as Testimonial;
         },
-        table: "testimonials",
-        filter: `tenant_id=eq.${tenantId}`,
-        enabled: !!tenantId,
+        enabled: !!tenantId && !!testimonialsQuery,
     });
 
     const invalidate = useCallback(
@@ -946,21 +924,18 @@ export function useTestimonials(tenantId: string | null) {
 
         setSaving(true);
         try {
-            const supabase = getSupabase();
-            const { error } = await supabase
-                .from("testimonials")
-                .insert({
-                    tenant_id: tenantId,
-                    client_name: testimonial.clientName,
-                    client_title: testimonial.clientTitle || null,
-                    location: testimonial.location || null,
-                    client_image_url: testimonial.clientImageUrl || null,
-                    review_text: testimonial.reviewText,
-                    rating: testimonial.rating,
-                    show_on_homepage: testimonial.showOnHomepage ?? false,
-                    sort_order: testimonials.length,
-                });
-            if (error) throw error;
+            const db = getDb();
+            await addDoc(collection(db, `tenants/${tenantId}/testimonials`), {
+                clientName: testimonial.clientName,
+                clientTitle: testimonial.clientTitle || null,
+                location: testimonial.location || null,
+                clientImageUrl: testimonial.clientImageUrl || null,
+                reviewText: testimonial.reviewText,
+                rating: testimonial.rating,
+                showOnHomepage: testimonial.showOnHomepage ?? false,
+                sortOrder: testimonials.length,
+                createdAt: serverTimestamp(),
+            });
             invalidate();
             return true;
         } catch (error) {
@@ -979,22 +954,18 @@ export function useTestimonials(tenantId: string | null) {
 
         setSaving(true);
         try {
-            const supabase = getSupabase();
+            const db = getDb();
             const dbUpdates: Record<string, any> = {};
-            if (updates.clientName !== undefined) dbUpdates.client_name = updates.clientName;
-            if (updates.clientTitle !== undefined) dbUpdates.client_title = updates.clientTitle;
+            if (updates.clientName !== undefined) dbUpdates.clientName = updates.clientName;
+            if (updates.clientTitle !== undefined) dbUpdates.clientTitle = updates.clientTitle;
             if (updates.location !== undefined) dbUpdates.location = updates.location;
-            if (updates.clientImageUrl !== undefined) dbUpdates.client_image_url = updates.clientImageUrl;
-            if (updates.reviewText !== undefined) dbUpdates.review_text = updates.reviewText;
+            if (updates.clientImageUrl !== undefined) dbUpdates.clientImageUrl = updates.clientImageUrl;
+            if (updates.reviewText !== undefined) dbUpdates.reviewText = updates.reviewText;
             if (updates.rating !== undefined) dbUpdates.rating = updates.rating;
-            if (updates.showOnHomepage !== undefined) dbUpdates.show_on_homepage = updates.showOnHomepage;
-            if (updates.order !== undefined) dbUpdates.sort_order = updates.order;
+            if (updates.showOnHomepage !== undefined) dbUpdates.showOnHomepage = updates.showOnHomepage;
+            if (updates.order !== undefined) dbUpdates.sortOrder = updates.order;
 
-            const { error } = await supabase
-                .from("testimonials")
-                .update(dbUpdates)
-                .eq("id", testimonialId);
-            if (error) throw error;
+            await updateDoc(doc(db, `tenants/${tenantId}/testimonials`, testimonialId), dbUpdates);
             invalidate();
             return true;
         } catch (error) {
@@ -1010,12 +981,8 @@ export function useTestimonials(tenantId: string | null) {
 
         setSaving(true);
         try {
-            const supabase = getSupabase();
-            const { error } = await supabase
-                .from("testimonials")
-                .delete()
-                .eq("id", testimonialId);
-            if (error) throw error;
+            const db = getDb();
+            await deleteDoc(doc(db, `tenants/${tenantId}/testimonials`, testimonialId));
             invalidate();
             return true;
         } catch (error) {
@@ -1065,6 +1032,7 @@ export function useTestimonials(tenantId: string | null) {
 
 // ============================================
 // ABOUT US HOOK
+// tenants/{tenantId}/pages/about
 // ============================================
 const DEFAULT_ABOUT: AboutUsContent = {
     mainHeading: "",
@@ -1085,15 +1053,21 @@ export function useAboutUs(tenantId: string | null) {
     const queryClient = useQueryClient();
     const qk = ["website-builder-about", tenantId] as const;
     const [saving, setSaving] = useState(false);
+    const db = getDb();
 
-    const { data: aboutContent = null, isLoading: loading } = useRealtimeQuery<AboutUsContent | null>({
+    const aboutDocRef = useMemo(() => {
+        if (!tenantId) return null;
+        return doc(db, `tenants/${tenantId}/pages`, "about");
+    }, [db, tenantId]);
+
+    const { data: aboutContent = null, isLoading: loading } = useFirestoreDoc<AboutUsContent>({
         queryKey: qk,
-        queryFn: async () => {
-            return fetchPageContent<AboutUsContent>(tenantId!, "about", DEFAULT_ABOUT);
+        docRef: aboutDocRef!,
+        mapDoc: (snap) => {
+            if (!snap.exists()) return DEFAULT_ABOUT;
+            return { ...DEFAULT_ABOUT, ...snap.data() } as AboutUsContent;
         },
-        table: "tenant_page_configs",
-        filter: `tenant_id=eq.${tenantId}`,
-        enabled: !!tenantId,
+        enabled: !!tenantId && !!aboutDocRef,
     });
 
     const invalidate = useCallback(
@@ -1108,7 +1082,7 @@ export function useAboutUs(tenantId: string | null) {
 
         setSaving(true);
         try {
-            await savePageContent(tenantId, "about", updates);
+            await savePageDoc(tenantId, "pages", "about", updates);
             invalidate();
             return true;
         } catch (error) {
@@ -1156,6 +1130,7 @@ export function useAboutUs(tenantId: string | null) {
 
 // ============================================
 // CONTACT HOOK
+// tenants/{tenantId}/pages/contact
 // ============================================
 const DEFAULT_CONTACT: ContactPageContent = {
     address: "",
@@ -1170,15 +1145,21 @@ export function useContact(tenantId: string | null) {
     const queryClient = useQueryClient();
     const qk = ["website-builder-contact", tenantId] as const;
     const [saving, setSaving] = useState(false);
+    const db = getDb();
 
-    const { data: contactContent = null, isLoading: loading } = useRealtimeQuery<ContactPageContent | null>({
+    const contactDocRef = useMemo(() => {
+        if (!tenantId) return null;
+        return doc(db, `tenants/${tenantId}/pages`, "contact");
+    }, [db, tenantId]);
+
+    const { data: contactContent = null, isLoading: loading } = useFirestoreDoc<ContactPageContent>({
         queryKey: qk,
-        queryFn: async () => {
-            return fetchPageContent<ContactPageContent>(tenantId!, "contact", DEFAULT_CONTACT);
+        docRef: contactDocRef!,
+        mapDoc: (snap) => {
+            if (!snap.exists()) return DEFAULT_CONTACT;
+            return { ...DEFAULT_CONTACT, ...snap.data() } as ContactPageContent;
         },
-        table: "tenant_page_configs",
-        filter: `tenant_id=eq.${tenantId}`,
-        enabled: !!tenantId,
+        enabled: !!tenantId && !!contactDocRef,
     });
 
     const invalidate = useCallback(
@@ -1193,7 +1174,7 @@ export function useContact(tenantId: string | null) {
 
         setSaving(true);
         try {
-            await savePageContent(tenantId, "contact", updates);
+            await savePageDoc(tenantId, "pages", "contact", updates);
             invalidate();
             return true;
         } catch (error) {
@@ -1213,47 +1194,42 @@ export function useContact(tenantId: string | null) {
 }
 
 // ============================================
-// TEAM MEMBERS HOOK
+// TEAM MEMBERS HOOK (website display team)
+// tenants/{tenantId}/teamMembers
 // ============================================
-function mapRowToTeamMember(row: any): TeamMember {
-    const social = row.social_links || {};
-    return {
-        id: row.id,
-        name: row.name || "",
-        role: row.role || "",
-        bio: row.bio || "",
-        imageUrl: row.image_url || "",
-        linkedinUrl: social.linkedin || "",
-        instagramUrl: social.instagram || "",
-        order: row.sort_order ?? 0,
-        createdAt: row.created_at,
-    };
-}
-
 export function useTeamMembers(tenantId: string | null) {
     const queryClient = useQueryClient();
     const qk = ["website-builder-team-members", tenantId] as const;
     const [saving, setSaving] = useState(false);
+    const db = getDb();
 
-    const { data: teamMembers = [], isLoading: loading } = useRealtimeQuery<TeamMember[]>({
+    const teamMembersQuery = useMemo(() => {
+        if (!tenantId) return null;
+        return query(
+            collection(db, `tenants/${tenantId}/teamMembers`),
+            orderBy("sortOrder", "asc")
+        );
+    }, [db, tenantId]);
+
+    const { data: teamMembers = [], isLoading: loading } = useFirestoreQuery<TeamMember>({
         queryKey: qk,
-        queryFn: async () => {
-            const supabase = getSupabase();
-            const { data, error } = await supabase
-                .from("team_members")
-                .select("*")
-                .eq("tenant_id", tenantId!)
-                .order("sort_order", { ascending: true });
-
-            if (error) {
-                console.error("Error fetching team members:", error);
-                return [];
-            }
-            return (data || []).map(mapRowToTeamMember);
+        collectionRef: teamMembersQuery!,
+        mapDoc: (snap) => {
+            const data = snap.data() || {};
+            const social = data.socialLinks || {};
+            return {
+                id: snap.id,
+                name: data.name || "",
+                role: data.role || "",
+                bio: data.bio || "",
+                imageUrl: data.imageUrl || "",
+                linkedinUrl: social.linkedin || "",
+                instagramUrl: social.instagram || "",
+                order: data.sortOrder ?? 0,
+                createdAt: data.createdAt,
+            } as TeamMember;
         },
-        table: "team_members",
-        filter: `tenant_id=eq.${tenantId}`,
-        enabled: !!tenantId,
+        enabled: !!tenantId && !!teamMembersQuery,
     });
 
     const invalidate = useCallback(
@@ -1268,23 +1244,20 @@ export function useTeamMembers(tenantId: string | null) {
 
         setSaving(true);
         try {
-            const supabase = getSupabase();
+            const db = getDb();
             const socialLinks: Record<string, string> = {};
             if (member.linkedinUrl) socialLinks.linkedin = member.linkedinUrl;
             if (member.instagramUrl) socialLinks.instagram = member.instagramUrl;
 
-            const { error } = await supabase
-                .from("team_members")
-                .insert({
-                    tenant_id: tenantId,
-                    name: member.name,
-                    role: member.role || null,
-                    bio: member.bio || null,
-                    image_url: member.imageUrl || null,
-                    social_links: Object.keys(socialLinks).length > 0 ? socialLinks : null,
-                    sort_order: teamMembers.length,
-                });
-            if (error) throw error;
+            await addDoc(collection(db, `tenants/${tenantId}/teamMembers`), {
+                name: member.name,
+                role: member.role || null,
+                bio: member.bio || null,
+                imageUrl: member.imageUrl || null,
+                socialLinks: Object.keys(socialLinks).length > 0 ? socialLinks : null,
+                sortOrder: teamMembers.length,
+                createdAt: serverTimestamp(),
+            });
             invalidate();
             return true;
         } catch (error) {
@@ -1303,32 +1276,26 @@ export function useTeamMembers(tenantId: string | null) {
 
         setSaving(true);
         try {
-            const supabase = getSupabase();
+            const db = getDb();
             const dbUpdates: Record<string, any> = {};
             if (updates.name !== undefined) dbUpdates.name = updates.name;
             if (updates.role !== undefined) dbUpdates.role = updates.role;
             if (updates.bio !== undefined) dbUpdates.bio = updates.bio;
-            if (updates.imageUrl !== undefined) dbUpdates.image_url = updates.imageUrl;
-            if (updates.order !== undefined) dbUpdates.sort_order = updates.order;
+            if (updates.imageUrl !== undefined) dbUpdates.imageUrl = updates.imageUrl;
+            if (updates.order !== undefined) dbUpdates.sortOrder = updates.order;
 
             if (updates.linkedinUrl !== undefined || updates.instagramUrl !== undefined) {
-                // Fetch current social_links to merge
-                const { data: current } = await supabase
-                    .from("team_members")
-                    .select("social_links")
-                    .eq("id", memberId)
-                    .single();
-                const social = { ...(current?.social_links || {}) };
+                // Fetch current socialLinks to merge
+                const memberDocRef = doc(db, `tenants/${tenantId}/teamMembers`, memberId);
+                const currentSnap = await getDoc(memberDocRef);
+                const currentData = currentSnap.exists() ? currentSnap.data() : {};
+                const social = { ...(currentData?.socialLinks || {}) };
                 if (updates.linkedinUrl !== undefined) social.linkedin = updates.linkedinUrl;
                 if (updates.instagramUrl !== undefined) social.instagram = updates.instagramUrl;
-                dbUpdates.social_links = social;
+                dbUpdates.socialLinks = social;
             }
 
-            const { error } = await supabase
-                .from("team_members")
-                .update(dbUpdates)
-                .eq("id", memberId);
-            if (error) throw error;
+            await updateDoc(doc(db, `tenants/${tenantId}/teamMembers`, memberId), dbUpdates);
             invalidate();
             return true;
         } catch (error) {
@@ -1344,12 +1311,8 @@ export function useTeamMembers(tenantId: string | null) {
 
         setSaving(true);
         try {
-            const supabase = getSupabase();
-            const { error } = await supabase
-                .from("team_members")
-                .delete()
-                .eq("id", memberId);
-            if (error) throw error;
+            const db = getDb();
+            await deleteDoc(doc(db, `tenants/${tenantId}/teamMembers`, memberId));
             invalidate();
             return true;
         } catch (error) {

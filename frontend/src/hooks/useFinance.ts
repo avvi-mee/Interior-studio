@@ -2,8 +2,15 @@
 
 import { useCallback, useMemo } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { getSupabase } from "@/lib/supabase";
-import { useRealtimeQuery } from "@/lib/supabaseQuery";
+import { getDb } from "@/lib/firebase";
+import {
+  collection,
+  query,
+  orderBy,
+  limit as firestoreLimit,
+  getDocs,
+} from "firebase/firestore";
+import { useFirestoreQuery } from "@/lib/firestoreQuery";
 import {
   Invoice,
   AgingBucketLabel,
@@ -23,13 +30,11 @@ import type { Payment } from "@/lib/services/invoiceService";
 import type { VendorPayment } from "@/lib/services/vendorBillService";
 
 // =============================================================================
-// v2 changes:
-//   - invoices.balance is a GENERATED column (amount - paid_amount). Read-only.
-//   - vendor_bills.balance is a GENERATED column. Read-only.
-//   - No more aging_bucket column in DB. Computed client-side only.
-//   - vendor_bill_payments renamed to vendor_payments
-//   - invoice_payments / vendor_payments now have tenant_id
-//   - Column selection instead of SELECT *
+// Firebase/Firestore migration:
+//   - invoices stored at tenants/{tenantId}/invoices
+//   - vendor bills stored at tenants/{tenantId}/vendorBills
+//   - balance is computed client-side (amount - paidAmount)
+//   - aging bucket computed client-side
 // =============================================================================
 
 export interface AgingBucket {
@@ -60,10 +65,6 @@ export interface ProjectFinanceSummary {
   vendorBills: VendorBill[];
 }
 
-// Column selections
-const INVOICE_COLS = "id,tenant_id,project_id,invoice_number,client_name,client_email,amount,paid_amount,balance,status,due_date,notes,created_at,updated_at";
-const VENDOR_BILL_COLS = "id,tenant_id,project_id,vendor_name,vendor_email,description,amount,paid_amount,balance,status,due_date,notes,created_at,updated_at";
-
 function parseDateMs(d: any): number | null {
   if (!d) return null;
   if (d instanceof Date) return d.getTime();
@@ -71,6 +72,7 @@ function parseDateMs(d: any): number | null {
     const ms = new Date(d).getTime();
     return isNaN(ms) ? null : ms;
   }
+  if (typeof d?.toMillis === "function") return d.toMillis();
   return null;
 }
 
@@ -112,72 +114,73 @@ function computeAging(items: Array<{ amount: number; paidAmount: number; dueDate
       continue;
     }
     const daysOverdue = Math.floor((now - dueDateMs) / 86400000);
-    if (daysOverdue <= 0) bucket.current += outstanding;
-    else if (daysOverdue <= 30) bucket.current += outstanding;
-    else if (daysOverdue <= 60) bucket.thirtyOne += outstanding;
-    else if (daysOverdue <= 90) bucket.sixtyOne += outstanding;
-    else bucket.ninetyPlus += outstanding;
+    if (daysOverdue <= 30) bucket.current += outstanding;        // matches computeAgingBucket
+    else if (daysOverdue <= 60) bucket.thirtyOne += outstanding; // 31-60 days past due
+    else if (daysOverdue <= 90) bucket.sixtyOne += outstanding;  // 61-90 days past due
+    else bucket.ninetyPlus += outstanding;                       // 90+ days past due
   }
   return bucket;
-}
-
-// v2: No more persistAgingBuckets — aging_bucket column was removed.
-// Balance is now a GENERATED column, always correct.
-
-interface FinanceData {
-  invoices: Invoice[];
-  vendorBills: VendorBill[];
 }
 
 export function useFinance(tenantId: string | null) {
   const queryClient = useQueryClient();
   const qk = ["finance", tenantId] as const;
+  const db = getDb();
 
-  const { data, isLoading: loading } = useRealtimeQuery<FinanceData>({
-    queryKey: qk,
-    queryFn: async () => {
-      const supabase = getSupabase();
+  // Build Firestore queries for invoices and vendor bills
+  const invoicesQuery = useMemo(() => {
+    if (!tenantId) return null;
+    return query(
+      collection(db, `tenants/${tenantId}/invoices`),
+      orderBy("createdAt", "desc"),
+      firestoreLimit(100)
+    );
+  }, [db, tenantId]);
 
-      const [invoiceRes, vendorBillRes] = await Promise.all([
-        supabase
-          .from("invoices")
-          .select(INVOICE_COLS)
-          .eq("tenant_id", tenantId!)
-          .order("created_at", { ascending: false })
-          .range(0, 99),
-        supabase
-          .from("vendor_bills")
-          .select(VENDOR_BILL_COLS)
-          .eq("tenant_id", tenantId!)
-          .order("created_at", { ascending: false })
-          .range(0, 99),
-      ]);
+  const vendorBillsQuery = useMemo(() => {
+    if (!tenantId) return null;
+    return query(
+      collection(db, `tenants/${tenantId}/vendorBills`),
+      orderBy("createdAt", "desc"),
+      firestoreLimit(100)
+    );
+  }, [db, tenantId]);
 
-      if (invoiceRes.error) throw invoiceRes.error;
-      if (vendorBillRes.error) throw vendorBillRes.error;
-
-      const invoiceDocs = (invoiceRes.data || []).map(mapRowToInvoice);
-      const enrichedInvoices = enrichAgingBucket(enrichOverdueStatus(invoiceDocs, "overdue"));
-
-      const vendorDocs = (vendorBillRes.data || []).map(mapRowToVendorBill);
-      const enrichedBills = enrichAgingBucket(enrichOverdueStatus(vendorDocs, "overdue"));
-
-      return { invoices: enrichedInvoices, vendorBills: enrichedBills };
-    },
-    table: "invoices",
-    filter: `tenant_id=eq.${tenantId}`,
-    enabled: !!tenantId,
-    additionalTables: [
-      { table: "vendor_bills", filter: `tenant_id=eq.${tenantId}` },
-    ],
+  // Fetch invoices
+  const { data: rawInvoices = [], isLoading: loadingInvoices } = useFirestoreQuery<Invoice>({
+    queryKey: ["finance-invoices", tenantId],
+    collectionRef: invoicesQuery!,
+    mapDoc: (snap) => mapRowToInvoice(snap.id, snap.data() || {}),
+    enabled: !!tenantId && !!invoicesQuery,
   });
 
-  const invoices = data?.invoices ?? [];
-  const vendorBills = data?.vendorBills ?? [];
+  // Fetch vendor bills
+  const { data: rawVendorBills = [], isLoading: loadingBills } = useFirestoreQuery<VendorBill>({
+    queryKey: ["finance-vendor-bills", tenantId],
+    collectionRef: vendorBillsQuery!,
+    mapDoc: (snap) => mapRowToVendorBill(snap.id, snap.data() || {}),
+    enabled: !!tenantId && !!vendorBillsQuery,
+  });
+
+  const loading = loadingInvoices || loadingBills;
+
+  // Enrich invoices and vendor bills with overdue status and aging buckets
+  const invoices = useMemo(
+    () => enrichAgingBucket(enrichOverdueStatus(rawInvoices, "overdue")),
+    [rawInvoices]
+  );
+
+  const vendorBills = useMemo(
+    () => enrichAgingBucket(enrichOverdueStatus(rawVendorBills, "overdue")),
+    [rawVendorBills]
+  );
 
   const invalidate = useCallback(
-    () => queryClient.invalidateQueries({ queryKey: qk }),
-    [queryClient, qk]
+    () => {
+      queryClient.invalidateQueries({ queryKey: ["finance-invoices", tenantId] });
+      queryClient.invalidateQueries({ queryKey: ["finance-vendor-bills", tenantId] });
+    },
+    [queryClient, tenantId]
   );
 
   // Finance stats
@@ -229,6 +232,7 @@ export function useFinance(tenantId: string | null) {
     async (data: {
       projectId: string;
       clientId: string;
+      clientEmail: string;
       clientName: string;
       amount: number;
       dueDate: Date;

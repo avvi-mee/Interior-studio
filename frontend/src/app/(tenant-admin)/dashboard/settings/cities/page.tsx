@@ -13,7 +13,7 @@ import { cn } from "@/lib/utils";
 
 export default function CitiesPage() {
     const { tenant } = useTenantAuth();
-    const { cities, loading, addCity, deleteCity, toggleCity, updateCities } = useCities(tenant?.id || null);
+    const { cities, loading, addCity, deleteCity, toggleCity, updateCity } = useCities(tenant?.id || null);
     const [showAddDialog, setShowAddDialog] = useState(false);
     const [newCityName, setNewCityName] = useState("");
     const [editingCityId, setEditingCityId] = useState<string | null>(null);
@@ -38,14 +38,12 @@ export default function CitiesPage() {
     };
 
     const handleToggleCity = async (cityId: string) => {
-        await toggleCity(cityId);
+        const city = cities.find(c => c.id === cityId);
+        if (city) await toggleCity(cityId, city.enabled);
     };
 
     const handleUpdateCityName = async (cityId: string, newName: string) => {
-        const updatedCities = cities.map(c =>
-            c.id === cityId ? { ...c, name: newName } : c
-        );
-        await updateCities(updatedCities);
+        await updateCity(cityId, { name: newName });
         setEditingCityId(null);
     };
 

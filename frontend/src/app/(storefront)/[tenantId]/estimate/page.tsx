@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, use } from "react";
+import { useState, useEffect, useRef, use } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,9 +9,9 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Loader2, CheckCircle2, Plus, Minus, Home, Building2, ChevronRight, ArrowLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { usePricingConfig } from "@/hooks/usePricingConfig";
+import { usePricingConfig, PricingItem } from "@/hooks/usePricingConfig";
 import { usePublicWebsiteConfig } from "@/hooks/useWebsiteConfig";
-import { getTenantByStoreId, Tenant } from "@/lib/firestoreHelpers";
+import { resolveTenant, Tenant } from "@/lib/firestoreHelpers";
 import { calculateEstimate } from "@/lib/calculateEstimate";
 import { saveEstimateDraft } from "@/lib/estimateTypes";
 
@@ -39,11 +39,11 @@ export default function EstimatorPage({ params }: { params: Promise<{ tenantId: 
     const [resolutionError, setResolutionError] = useState(false);
 
     useEffect(() => {
-        const resolveTenant = async () => {
+        const loadTenant = async () => {
             if (!tenantSlug) return;
             try {
                 // Try lowercase first as it's the standard for storeIds
-                const tenant = await getTenantByStoreId(tenantSlug.toLowerCase()) || await getTenantByStoreId(tenantSlug);
+                const tenant = await resolveTenant(tenantSlug);
                 if (tenant) {
                     setResolvedTenant(tenant);
                 } else {
@@ -56,7 +56,7 @@ export default function EstimatorPage({ params }: { params: Promise<{ tenantId: 
                 setTenantLoading(false);
             }
         };
-        resolveTenant();
+        loadTenant();
     }, [tenantSlug]);
 
     const { config: websiteConfig, loading: websiteLoading } = usePublicWebsiteConfig(tenantSlug);
@@ -146,13 +146,76 @@ export default function EstimatorPage({ params }: { params: Promise<{ tenantId: 
         window.scrollTo({ top: 0, behavior: 'smooth' });
     }, [step]);
 
+    // Carpet area settings
+    const carpetAreaSettings = config?.carpetAreaSettings;
+    const minSqft = carpetAreaSettings?.minSqft || 0;
+    const maxSqft = carpetAreaSettings?.maxSqft || Infinity;
+    const carpetAreaNum = parseFloat(carpetArea) || 0;
+    const carpetAreaInRange = carpetAreaNum >= minSqft && carpetAreaNum <= maxSqft;
+
     const isStepValid = () => {
         if (step === 1) return true;
         if (step === 2) return true;
-        if (step === 3) return carpetArea && parseFloat(carpetArea) > 0;
+        if (step === 3) return carpetArea && carpetAreaNum > 0 && carpetAreaInRange;
         if (step === 4) return true;
         return false;
     };
+
+    // Helper to filter items by plan visibility
+    const filterByPlanVisibility = (items: PricingItem[]) => {
+        return items.filter(item => {
+            if (!item.enabled) return false;
+            if (!item.planVisibility || item.planVisibility.length === 0) return true;
+            return item.planVisibility.includes(selectedPlan);
+        });
+    };
+
+    // Pre-fill default quantities when entering step 4
+    const defaultsAppliedRef = useRef(false);
+    useEffect(() => {
+        if (step === 4 && config?.categories && !defaultsAppliedRef.current) {
+            defaultsAppliedRef.current = true;
+            const allCategories = config.categories.filter(c => {
+                if (segment === 'Residential') return !c.type || c.type === 'residential';
+                return c.type === 'commercial';
+            });
+
+            const newLivingAreaItems: ItemQuantity = { ...livingAreaItems };
+            const newKitchenItems: ItemQuantity = { ...kitchenItems };
+            let hasChanges = false;
+
+            allCategories.forEach(category => {
+                const isKitchen = category.id === 'kitchen' || category.name.toLowerCase() === 'kitchen';
+                const isBedroom = category.id === 'bedroom' || category.name.toLowerCase() === 'bedroom';
+                const isBathroom = category.id === 'bathroom' || category.name.toLowerCase() === 'bathroom';
+
+                category.items.forEach(item => {
+                    if (!item.enabled || !item.defaultQuantity || item.defaultQuantity <= 0) return;
+                    if (item.planVisibility && item.planVisibility.length > 0 && !item.planVisibility.includes(selectedPlan)) return;
+
+                    if (isKitchen) {
+                        if (!(item.id in newKitchenItems) || newKitchenItems[item.id] === 0) {
+                            newKitchenItems[item.id] = item.defaultQuantity;
+                            hasChanges = true;
+                        }
+                    } else if (!isBedroom && !isBathroom) {
+                        if (!(item.id in newLivingAreaItems) || newLivingAreaItems[item.id] === 0) {
+                            newLivingAreaItems[item.id] = item.defaultQuantity;
+                            hasChanges = true;
+                        }
+                    }
+                });
+            });
+
+            if (hasChanges) {
+                setLivingAreaItems(newLivingAreaItems);
+                setKitchenItems(newKitchenItems);
+            }
+        }
+        if (step !== 4) {
+            defaultsAppliedRef.current = false;
+        }
+    }, [step, config, segment, selectedPlan]);
 
     const updateItemQuantity = (
         category: 'livingArea' | 'kitchen' | 'bedroom' | 'bathroom' | 'cabin',
@@ -228,7 +291,7 @@ export default function EstimatorPage({ params }: { params: Promise<{ tenantId: 
             tenantSlug,
             savedAt: Date.now()
         });
-        router.push(`/${tenantSlug}/estimate/login`);
+        router.push(`/${tenantSlug}/login?next=/estimate/review`);
     };
 
     if (loading) {
@@ -428,11 +491,22 @@ export default function EstimatorPage({ params }: { params: Promise<{ tenantId: 
                                 <Input
                                     type="number"
                                     placeholder="e.g 1200"
-                                    className="h-16 text-2xl font-light bg-gray-50 border-0 focus:ring-2 focus:ring-black/5 rounded-2xl transition-all pl-6"
+                                    className={cn(
+                                        "h-16 text-2xl font-light bg-gray-50 border-0 focus:ring-2 focus:ring-black/5 rounded-2xl transition-all pl-6",
+                                        carpetArea && !carpetAreaInRange && "ring-2 ring-red-300"
+                                    )}
                                     value={carpetArea}
                                     onChange={(e) => setCarpetArea(e.target.value)}
                                     autoFocus
                                 />
+                                {minSqft > 0 || maxSqft < Infinity ? (
+                                    <p className={cn(
+                                        "text-xs ml-1",
+                                        carpetArea && !carpetAreaInRange ? "text-red-500 font-medium" : "text-gray-400"
+                                    )}>
+                                        Enter between {minSqft.toLocaleString('en-IN')} - {maxSqft === Infinity ? '∞' : maxSqft.toLocaleString('en-IN')} sq ft
+                                    </p>
+                                ) : null}
                             </div>
                             {segment === 'Residential' ? (
                                 <>
@@ -487,14 +561,14 @@ export default function EstimatorPage({ params }: { params: Promise<{ tenantId: 
 
                         <div className="space-y-16">
                             {/* Living Area */}
-                            {livingAreaCategory && livingAreaCategory.items.filter(i => i.enabled).length > 0 && (
+                            {livingAreaCategory && filterByPlanVisibility(livingAreaCategory.items).length > 0 && (
                                 <div className="space-y-6">
                                     <div className="flex items-center gap-4 border-b border-gray-100 pb-4">
                                         <div className="h-10 w-1 rounded-full" style={{ backgroundColor: primaryColor }}></div>
                                         <h2 className="text-2xl font-bold text-[#0F172A]">Living Area</h2>
                                     </div>
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                        {livingAreaCategory.items.filter(i => i.enabled).map(item => (
+                                        {filterByPlanVisibility(livingAreaCategory.items).map(item => (
                                             <div key={item.id} className="flex items-center justify-between p-6 border border-gray-100 bg-white rounded-2xl hover:shadow-lg transition-all duration-300">
                                                 <span className="font-semibold text-lg text-gray-700">{item.name}</span>
                                                 <div className="flex items-center gap-3 bg-gray-50 rounded-xl p-1">
@@ -557,9 +631,9 @@ export default function EstimatorPage({ params }: { params: Promise<{ tenantId: 
                                             </Select>
                                         </div>
                                     </div>
-                                    {kitchenCategory.items.filter(i => i.enabled).length > 0 && (
+                                    {filterByPlanVisibility(kitchenCategory.items).length > 0 && (
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                            {kitchenCategory.items.filter(i => i.enabled).map(item => (
+                                            {filterByPlanVisibility(kitchenCategory.items).map(item => (
                                                 <div key={item.id} className="flex items-center justify-between p-6 border border-gray-100 bg-white rounded-2xl hover:shadow-lg transition-all duration-300">
                                                     <span className="font-semibold text-lg text-gray-700">{item.name}</span>
                                                     <div className="flex items-center gap-3 bg-gray-50 rounded-xl p-1">
@@ -599,7 +673,7 @@ export default function EstimatorPage({ params }: { params: Promise<{ tenantId: 
                                         <div key={index} className="space-y-4 p-8 bg-gray-50/50 rounded-3xl border border-gray-100">
                                             <h3 className="font-bold text-lg text-gray-400 uppercase tracking-widest mb-4">Bedroom {index + 1}</h3>
                                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                                {bedroomCategory.items.filter(i => i.enabled).map(item => (
+                                                {filterByPlanVisibility(bedroomCategory.items).map(item => (
                                                     <div key={item.id} className="flex items-center justify-between p-5 border border-gray-100 bg-white rounded-2xl hover:border-gray-300 transition-colors">
                                                         <span className="font-medium">{item.name}</span>
                                                         <div className="flex items-center gap-3 bg-gray-50 rounded-lg p-1">
@@ -626,7 +700,7 @@ export default function EstimatorPage({ params }: { params: Promise<{ tenantId: 
                                         <div key={index} className="space-y-4 p-8 bg-gray-50/50 rounded-3xl border border-gray-100">
                                             <h3 className="font-bold text-lg text-gray-400 uppercase tracking-widest mb-4">Bathroom Unit {index + 1}</h3>
                                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                                {bathroomCategory.items.filter(i => i.enabled).map(item => (
+                                                {filterByPlanVisibility(bathroomCategory.items).map(item => (
                                                     <div key={item.id} className="flex items-center justify-between p-5 border border-gray-100 bg-white rounded-2xl hover:border-gray-300 transition-colors">
                                                         <span className="font-medium">{item.name}</span>
                                                         <div className="flex items-center gap-3 bg-gray-50 rounded-lg p-1">
@@ -653,7 +727,7 @@ export default function EstimatorPage({ params }: { params: Promise<{ tenantId: 
                                         <div key={index} className="space-y-4 p-8 bg-gray-50/50 rounded-3xl border border-gray-100">
                                             <h3 className="font-bold text-lg text-gray-400 uppercase tracking-widest mb-4">Cabin {index + 1}</h3>
                                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                                {categories.find(c => c.id === 'cabin' || c.name.toLowerCase() === 'cabin')?.items.filter(i => i.enabled).map(item => (
+                                                {filterByPlanVisibility(categories.find(c => c.id === 'cabin' || c.name.toLowerCase() === 'cabin')?.items || []).map(item => (
                                                     <div key={item.id} className="flex items-center justify-between p-5 border border-gray-100 bg-white rounded-2xl hover:border-gray-300 transition-colors">
                                                         <span className="font-medium">{item.name}</span>
                                                         <div className="flex items-center gap-3 bg-gray-50 rounded-lg p-1">
@@ -677,7 +751,7 @@ export default function EstimatorPage({ params }: { params: Promise<{ tenantId: 
                                         <h2 className="text-2xl font-bold text-[#0F172A]">{category.name}</h2>
                                     </div>
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                        {category.items.filter(i => i.enabled).map(item => (
+                                        {filterByPlanVisibility(category.items).map(item => (
                                             <div key={item.id} className="flex items-center justify-between p-6 border border-gray-100 bg-white rounded-2xl hover:shadow-lg transition-all duration-300">
                                                 <span className="font-semibold text-lg text-gray-700">{item.name}</span>
                                                 <div className="flex items-center gap-3 bg-gray-50 rounded-xl p-1">

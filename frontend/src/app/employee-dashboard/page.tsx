@@ -2,8 +2,8 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { db } from "@/lib/firebase";
-import { doc, onSnapshot, getDoc, collection, query, where, Timestamp, updateDoc, arrayUnion, writeBatch, serverTimestamp } from "firebase/firestore";
+import { getDb } from "@/lib/firebase";
+import { doc, getDoc, getDocs, collection, query, where, onSnapshot, updateDoc } from "firebase/firestore";
 import { Loader2, LogOut, Briefcase, Phone, MapPin, User, CheckCircle, Clock, FileText, MessageSquare, Calendar, ChevronRight, Activity, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardFooter } from "@/components/ui/card";
@@ -109,67 +109,53 @@ export default function EmployeeDashboard() {
         }
 
         const { id, tenantId } = sessionData;
+        const db = getDb();
 
-        // 2. Listen to Employee Data (Real-time)
-        const unsubEmployee = onSnapshot(doc(db, "tenants", tenantId, "employees", id), (docSnap) => {
-            if (docSnap.exists()) {
-                setEmployee({ id: docSnap.id, ...docSnap.data() } as EmployeeData);
-            } else {
+        // 2. Fetch Employee Data
+        const fetchEmployee = async () => {
+            try {
+                const empRef = doc(db, `tenants/${tenantId}/employees`, id);
+                const empSnap = await getDoc(empRef);
+
+                if (!empSnap.exists()) {
+                    sessionStorage.removeItem("employeeSession");
+                    router.push("/login");
+                    return;
+                }
+
+                const data = empSnap.data();
+                setEmployee({
+                    id: empSnap.id,
+                    tenantId: tenantId,
+                    name: data.full_name || data.name || "",
+                    email: data.email || "",
+                    area: data.area || "",
+                    phone: data.phone || "",
+                    totalWork: data.total_work || 0,
+                    currentWork: data.current_work || "None",
+                    upcomingWork: data.upcoming_work,
+                });
+            } catch (error) {
+                console.error("Error fetching employee:", error);
                 sessionStorage.removeItem("employeeSession");
                 router.push("/login");
             }
-        });
+        };
 
-        // 3. Listen to Assigned Orders
-        // FETCH ALL (Client-side filter) to debug/avoid index issues
-        const ordersQuery = query(
-            collection(db, "tenants", tenantId, "estimates")
-        );
-        const unsubOrders = onSnapshot(ordersQuery, (snapshot) => {
-            const allOrds = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as AssignedOrder));
-
-            // Log for debugging
-            console.log(`[DEBUG] Fetched ${allOrds.length} estimates for tenant ${tenantId}`);
-            allOrds.forEach(o => console.log(` - Order ${o.id}: assignedTo=${o.assignedTo}, myId=${id}`));
-
-            const myOrds = allOrds.filter(o => o.assignedTo === id);
-
-            // Sort by Date Desc
-            myOrds.sort((a, b) => (b.createdAt?.toMillis?.() || 0) - (a.createdAt?.toMillis?.() || 0));
-            setOrders(myOrds);
-        }, (error) => {
-            console.error("Error fetching orders:", error);
-            alert(`Error fetching orders: ${error.message}`);
-        });
-
-        // 4. Listen to Assigned Requests
-        // Note: We fetch ALL tenant requests and filter client-side to avoid "Index Missing" errors
-        // and because security rules for root collections require tenantId match.
-        const requestsQuery = query(
-            collection(db, "consultation_requests"),
-            where("tenantId", "==", tenantId)
-        );
-        const unsubRequests = onSnapshot(requestsQuery, (snapshot) => {
-            const allReqs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as AssignedRequest));
-            // Filter on client side
-            const myReqs = allReqs.filter(r => (r as any).assignedTo === id);
-
-            // Sort by date
-            myReqs.sort((a, b) => (b.createdAt?.toMillis?.() || 0) - (a.createdAt?.toMillis?.() || 0));
-            setRequests(myReqs);
-        }, (error) => {
-            console.error("Error fetching requests:", error);
-            alert(`Error fetching requests: ${error.message}`);
-        });
-
-
-
-        // 5. Fetch Designer Info
+        // 3. Fetch Designer Info (brand page config)
         const fetchDesigner = async () => {
             try {
-                const brandDoc = await getDoc(doc(db, "tenants", tenantId, "brand", "config"));
-                if (brandDoc.exists()) {
-                    setDesigner(brandDoc.data() as DesignerInfo);
+                const brandRef = doc(db, `tenants/${tenantId}/pages/brand`);
+                const brandSnap = await getDoc(brandRef);
+
+                if (brandSnap.exists()) {
+                    const c = brandSnap.data().content || brandSnap.data();
+                    setDesigner({
+                        brandName: c.brandName || "",
+                        phone: c.phone || "",
+                        email: c.email || "",
+                        logoUrl: c.logoUrl || "",
+                    });
                 }
             } catch (err) {
                 console.error("Error loading designer info", err);
@@ -178,13 +164,77 @@ export default function EmployeeDashboard() {
             }
         };
 
+        fetchEmployee();
         fetchDesigner();
 
+        // 4. Realtime subscription for employee doc
+        const empUnsub = onSnapshot(doc(db, `tenants/${tenantId}/employees`, id), (snap) => {
+            if (snap.exists()) {
+                const data = snap.data();
+                setEmployee({
+                    id: snap.id,
+                    tenantId: tenantId,
+                    name: data.full_name || data.name || "",
+                    email: data.email || "",
+                    area: data.area || "",
+                    phone: data.phone || "",
+                    totalWork: data.total_work || 0,
+                    currentWork: data.current_work || "None",
+                    upcomingWork: data.upcoming_work,
+                });
+            }
+        });
+
+        // 5. Realtime subscription for estimates (orders)
+        const estimatesRef = collection(db, `tenants/${tenantId}/estimates`);
+        const ordersUnsub = onSnapshot(estimatesRef, (snap) => {
+            const allOrds = snap.docs.map(d => {
+                const row = d.data();
+                return {
+                    id: d.id,
+                    clientName: row.client_name,
+                    customerInfo: row.customer_info,
+                    plan: row.plan,
+                    totalAmount: row.total_amount,
+                    estimatedAmount: row.estimated_amount,
+                    status: row.status,
+                    assignedTo: row.assigned_to,
+                    createdAt: row.created_at,
+                    timeline: row.timeline || [],
+                } as AssignedOrder;
+            });
+
+            const myOrds = allOrds.filter(o => o.assignedTo === id);
+            myOrds.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+            setOrders(myOrds);
+        });
+
+        // 6. Realtime subscription for consultations (requests)
+        const consultationsRef = collection(db, `tenants/${tenantId}/consultations`);
+        const requestsUnsub = onSnapshot(consultationsRef, (snap) => {
+            const allReqs = snap.docs.map(d => {
+                const row = d.data();
+                return {
+                    id: d.id,
+                    clientName: row.client_name || row.name,
+                    phone: row.phone,
+                    phoneNumber: row.phone_number,
+                    requirement: row.requirement,
+                    status: row.status,
+                    createdAt: row.created_at,
+                    timeline: row.timeline || [],
+                    assignedTo: row.assigned_to,
+                };
+            });
+            const myReqs = allReqs.filter((r: any) => r.assignedTo === id);
+            myReqs.sort((a: any, b: any) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+            setRequests(myReqs as AssignedRequest[]);
+        });
+
         return () => {
-            unsubEmployee();
-            unsubOrders();
-            unsubRequests();
-            unsubRequests();
+            empUnsub();
+            ordersUnsub();
+            requestsUnsub();
         };
     }, [router]);
 
@@ -194,15 +244,19 @@ export default function EmployeeDashboard() {
     };
 
     const formatDate = (timestamp: any) => {
-        if (!timestamp?.toDate) return "-";
-        return timestamp.toDate().toLocaleDateString("en-US", {
+        if (!timestamp) return "-";
+        const date = new Date(timestamp);
+        if (isNaN(date.getTime())) return "-";
+        return date.toLocaleDateString("en-US", {
             month: "short", day: "numeric", year: "numeric"
         });
     };
 
     const formatTime = (timestamp: any) => {
-        if (!timestamp?.toDate) return "";
-        return timestamp.toDate().toLocaleTimeString("en-US", {
+        if (!timestamp) return "";
+        const date = new Date(timestamp);
+        if (isNaN(date.getTime())) return "";
+        return date.toLocaleTimeString("en-US", {
             hour: '2-digit', minute: '2-digit'
         });
     };
@@ -212,38 +266,41 @@ export default function EmployeeDashboard() {
         setIsUpdating(true);
 
         try {
-            const updateRef = updateType === 'order'
-                ? doc(db, `tenants/${employee.tenantId}/estimates`, selectedItem.id)
-                : doc(db, "consultation_requests", selectedItem.id);
+            const db = getDb();
+            const collectionName = updateType === 'order' ? 'estimates' : 'consultations';
 
-            const timestamp = Timestamp.now();
-            const updateData = {
+            const nowISO = new Date().toISOString();
+            const timelineEntry = {
                 status: newStatus,
-                timeline: arrayUnion({
-                    status: newStatus,
-                    timestamp: timestamp,
-                    updatedBy: employee.name,
-                    note: statusNote
-                })
+                timestamp: nowISO,
+                updatedBy: employee.name,
+                note: statusNote,
             };
 
-            await updateDoc(updateRef, updateData);
+            // Get current timeline
+            const itemRef = doc(db, `tenants/${employee.tenantId}/${collectionName}`, selectedItem.id);
+            const currentSnap = await getDoc(itemRef);
+            const existingTimeline = currentSnap.data()?.timeline || [];
 
-            // Also update employee's current work if status is active
+            await updateDoc(itemRef, {
+                status: newStatus,
+                timeline: [...existingTimeline, timelineEntry],
+            });
+
+            // Also update team member's current work if status is active
+            const empRef = doc(db, `tenants/${employee.tenantId}/employees`, employee.id);
             if (newStatus === 'running' || newStatus === 'in_progress' || newStatus === 'contacted') {
-                const employeeRef = doc(db, "tenants", employee.tenantId, "employees", employee.id);
-                await updateDoc(employeeRef, {
-                    currentWork: updateType === 'order'
+                await updateDoc(empRef, {
+                    current_work: updateType === 'order'
                         ? (selectedItem.customerInfo?.name || "Order Task")
-                        : (selectedItem.clientName || "Request Task")
+                        : (selectedItem.clientName || "Request Task"),
                 });
             }
             // If completed, clear current work
             if (newStatus === 'completed' || newStatus === 'closed' || newStatus === 'successful') {
-                const employeeRef = doc(db, "tenants", employee.tenantId, "employees", employee.id);
-                await updateDoc(employeeRef, {
-                    currentWork: "None",
-                    totalWork: (employee.totalWork || 0) + 1
+                await updateDoc(empRef, {
+                    current_work: "None",
+                    total_work: (employee.totalWork || 0) + 1,
                 });
             }
 
@@ -408,7 +465,7 @@ export default function EmployeeDashboard() {
                                                                 <FileText className="h-4 w-4 mr-2" /> {order.plan} Plan
                                                             </div>
                                                             <div className="pt-2 font-bold text-lg text-emerald-700">
-                                                                ₹{(order.totalAmount || order.estimatedAmount || 0).toLocaleString('en-IN')}
+                                                                {(order.totalAmount || order.estimatedAmount || 0).toLocaleString('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 })}
                                                             </div>
                                                         </div>
                                                     </div>

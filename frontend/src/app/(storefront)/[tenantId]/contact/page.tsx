@@ -2,9 +2,9 @@
 
 import { use, useEffect, useState } from "react";
 import { Loader2, MapPin, Phone, Mail, MessageCircle, Instagram } from "lucide-react";
-import { db } from "@/lib/firebase";
+import { getDb } from "@/lib/firebase";
 import { doc, getDoc } from "firebase/firestore";
-import { getTenantByStoreId } from "@/lib/firestoreHelpers";
+import { resolveTenant } from "@/lib/firestoreHelpers";
 import type { ContactPageContent, BrandConfig, ThemeConfig } from "@/types/website";
 
 import ConsultationForm from "@/components/storefront/ConsultationForm";
@@ -27,8 +27,10 @@ export default function ContactPage({ params }: { params: Promise<{ tenantId: st
             }
 
             try {
+                const db = getDb();
+
                 // Case-insensitive resolution
-                const tenant = await getTenantByStoreId(storeSlug.toLowerCase()) || await getTenantByStoreId(storeSlug);
+                const tenant = await resolveTenant(storeSlug);
                 if (!tenant) {
                     if (isMounted) setLoading(false);
                     return;
@@ -36,19 +38,21 @@ export default function ContactPage({ params }: { params: Promise<{ tenantId: st
 
                 if (isMounted) {
                     setTenantId(tenant.id);
-                    const brandDoc = await getDoc(doc(db, "tenants", tenant.id, "brand", "config"));
-                    if (brandDoc.exists()) {
-                        setBrand(brandDoc.data() as BrandConfig);
-                    }
 
-                    const themeDoc = await getDoc(doc(db, "tenants", tenant.id, "theme", "config"));
-                    if (themeDoc.exists()) {
-                        setTheme(themeDoc.data() as ThemeConfig);
+                    // Fetch brand and theme from their dedicated config docs
+                    const [brandSnap, themeSnap, contactSnap] = await Promise.all([
+                        getDoc(doc(db, `tenants/${tenant.id}/brand/config`)),
+                        getDoc(doc(db, `tenants/${tenant.id}/theme/config`)),
+                        getDoc(doc(db, `tenants/${tenant.id}/pages/contact`)),
+                    ]);
+                    if (brandSnap.exists()) {
+                        setBrand((brandSnap.data()?.content || brandSnap.data()) as BrandConfig);
                     }
-
-                    const contactDoc = await getDoc(doc(db, "tenants", tenant.id, "pages", "contact"));
-                    if (contactDoc.exists()) {
-                        setContactContent(contactDoc.data() as ContactPageContent);
+                    if (themeSnap.exists()) {
+                        setTheme((themeSnap.data()?.content || themeSnap.data()) as ThemeConfig);
+                    }
+                    if (contactSnap.exists()) {
+                        setContactContent((contactSnap.data()?.content || contactSnap.data()) as ContactPageContent);
                     }
                 }
             } catch (error) {

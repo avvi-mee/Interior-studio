@@ -7,9 +7,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { getFirebaseAuth } from "@/lib/firebase";
 import { createUserWithEmailAndPassword } from "firebase/auth";
-import { auth } from "@/lib/firebase";
-import { addDesigner, generateStoreId } from "@/lib/firestoreHelpers";
+import { addDesigner, generateSlug } from "@/lib/firestoreHelpers";
+import { validateTenantSlug } from "@/lib/reservedSlugs";
 import { UserPlus } from "lucide-react";
 
 export default function SignupPage() {
@@ -32,7 +33,6 @@ export default function SignupPage() {
         setLoading(true);
 
         try {
-            // Validation
             if (!formData.name || !formData.email || !formData.password || !formData.businessName) {
                 setError("Please fill in all required fields");
                 setLoading(false);
@@ -51,7 +51,6 @@ export default function SignupPage() {
                 return;
             }
 
-            // Email validation
             const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
             if (!emailRegex.test(formData.email)) {
                 setError("Please enter a valid email address");
@@ -59,33 +58,42 @@ export default function SignupPage() {
                 return;
             }
 
-            // Create Firebase Auth account
-            const userCredential = await createUserWithEmailAndPassword(auth, formData.email, formData.password);
+            // Validate slug
+            const slug = generateSlug(formData.businessName);
+            const slugValidation = validateTenantSlug(slug);
+            if (!slugValidation.valid) {
+                setError(slugValidation.reason || "Invalid business name for URL slug");
+                setLoading(false);
+                return;
+            }
 
-            // Create tenant record in Firestore with pending status
+            const auth = getFirebaseAuth();
+
+            // Create Firebase Auth account
+            const userCredential = await createUserWithEmailAndPassword(
+                auth,
+                formData.email,
+                formData.password
+            );
+
+            // Create tenant record with pending status
             await addDesigner({
                 uid: userCredential.user.uid,
-                name: formData.name,
+                name: formData.businessName,
                 email: formData.email,
                 phone: formData.phone,
-                businessName: formData.businessName,
-                storeId: generateStoreId(formData.businessName),
+                slug,
                 plan: "free",
             });
 
             setSuccess(true);
 
-            // Redirect to login after 3 seconds
             setTimeout(() => {
                 router.push("/login");
             }, 3000);
         } catch (err: any) {
             if (err.code === "auth/email-already-in-use") {
                 setError("An account with this email already exists");
-            } else if (err.code === "auth/weak-password") {
-                setError("Password is too weak");
-            } else if (err.code === "auth/invalid-email") {
-                setError("Invalid email address");
             } else {
                 setError(`Failed to create account: ${err.message || "Please try again"}`);
             }

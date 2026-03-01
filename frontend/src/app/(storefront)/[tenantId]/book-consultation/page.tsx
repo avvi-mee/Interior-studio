@@ -7,7 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Loader2, CheckCircle2, X } from "lucide-react";
 import ConsultationForm from "@/components/storefront/ConsultationForm";
 import { useCustomerAuth } from "@/hooks/useCustomerAuth";
-import { getTenantByStoreId, Tenant } from "@/lib/firestoreHelpers";
+import { resolveTenant, Tenant } from "@/lib/firestoreHelpers";
 
 export default function BookConsultationPage({ params }: { params: Promise<{ tenantId: string }> }) {
     const { tenantId: storeSlug } = use(params);
@@ -22,14 +22,14 @@ export default function BookConsultationPage({ params }: { params: Promise<{ ten
 
     useEffect(() => {
         let isMounted = true;
-        const resolveTenant = async () => {
+        const loadTenant = async () => {
             if (!storeSlug) {
                 if (isMounted) setTenantLoading(false);
                 return;
             }
             try {
                 // Try lowercase first as it's the standard for storeIds
-                const tenant = await getTenantByStoreId(storeSlug.toLowerCase()) || await getTenantByStoreId(storeSlug);
+                const tenant = await resolveTenant(storeSlug);
                 if (tenant) {
                     if (isMounted) setResolvedTenant(tenant);
                 } else {
@@ -42,7 +42,7 @@ export default function BookConsultationPage({ params }: { params: Promise<{ ten
                 if (isMounted) setTenantLoading(false);
             }
         };
-        resolveTenant();
+        loadTenant();
 
         return () => { isMounted = false; };
     }, [storeSlug]);

@@ -4,9 +4,9 @@ import { useEffect, useState, use } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft, Loader2 } from "lucide-react";
-import { db } from "@/lib/firebase";
-import { collection, query, where, getDocs, doc, onSnapshot } from "firebase/firestore";
-import { getTenantByStoreId } from "@/lib/firestoreHelpers";
+import { getDb } from "@/lib/firebase";
+import { doc, getDoc, collection, query, where, getDocs } from "firebase/firestore";
+import { resolveTenant } from "@/lib/firestoreHelpers";
 import { useScrollAnimation } from "@/hooks/useScrollAnimation";
 import type { CustomPage } from "@/types/website";
 import type { ThemeConfig } from "@/types/website";
@@ -29,31 +29,46 @@ export default function CustomPageView({ params }: CustomPageViewProps) {
 
         const loadPage = async () => {
             try {
-                const tenant = await getTenantByStoreId(storeSlug.toLowerCase()) || await getTenantByStoreId(storeSlug);
+                const db = getDb();
+                const tenant = await resolveTenant(storeSlug);
                 if (!tenant) {
                     if (isMounted) { setNotFound(true); setLoading(false); }
                     return;
                 }
 
-                // Listen to theme
-                const themeRef = doc(db, "tenants", tenant.id, "theme", "config");
-                onSnapshot(themeRef, (snapshot) => {
-                    if (isMounted && snapshot.exists()) {
-                        setTheme(snapshot.data() as ThemeConfig);
-                    }
-                });
+                // Fetch theme config
+                const themeRef = doc(db, `tenants/${tenant.id}/pages/theme`);
+                const themeSnap = await getDoc(themeRef);
+
+                if (isMounted && themeSnap.exists()) {
+                    const data = themeSnap.data();
+                    setTheme((data?.content || data) as ThemeConfig);
+                }
 
                 // Query custom pages by slug
-                const pagesRef = collection(db, "tenants", tenant.id, "pages", "custom", "items");
-                const q = query(pagesRef, where("slug", "==", slug));
-                const snapshot = await getDocs(q);
+                const customPagesRef = collection(db, `tenants/${tenant.id}/customPages`);
+                const customPageQuery = query(customPagesRef, where("slug", "==", slug));
+                const customPageSnap = await getDocs(customPageQuery);
 
-                if (snapshot.empty) {
+                if (customPageSnap.empty) {
                     if (isMounted) { setNotFound(true); setLoading(false); }
                     return;
                 }
 
-                const pageData = { id: snapshot.docs[0].id, ...snapshot.docs[0].data() } as CustomPage;
+                const customPageData = customPageSnap.docs[0].data();
+
+                // Map DB row to CustomPage interface
+                const pageData: CustomPage = {
+                    id: customPageSnap.docs[0].id,
+                    title: customPageData.title,
+                    slug: customPageData.slug,
+                    heading: customPageData.heading,
+                    description: customPageData.description,
+                    imageUrl: customPageData.image_url,
+                    showInNav: customPageData.show_in_nav,
+                    isPublished: customPageData.is_published,
+                    order: customPageData.sort_order,
+                };
 
                 if (!pageData.isPublished) {
                     if (isMounted) { setNotFound(true); setLoading(false); }

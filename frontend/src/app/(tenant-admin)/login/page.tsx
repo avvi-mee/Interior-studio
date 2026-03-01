@@ -10,8 +10,8 @@ import { Label } from "@/components/ui/label";
 import { useTenantAuth } from "@/hooks/useTenantAuth";
 import { Lock, User, Briefcase } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { collection, query, where, getDocs } from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import { getFirebaseAuth } from "@/lib/firebase";
+import { signInWithEmailAndPassword } from "firebase/auth";
 
 export default function TenantLoginPage() {
     const [email, setEmail] = useState("");
@@ -52,42 +52,39 @@ export default function TenantLoginPage() {
         setEmployeeLoading(true);
         setEmployeeError("");
 
+        const auth = getFirebaseAuth();
         try {
-            // Get all tenants, then search each tenant's employees subcollection
-            const tenantsSnapshot = await getDocs(collection(db, "tenants"));
+            // Step 1: Sign in with Firebase Auth to get an ID token
+            const userCredential = await signInWithEmailAndPassword(auth, email, password);
+            const idToken = await userCredential.user.getIdToken();
 
-            let emailFound = false;
-            let employeeData = null;
+            // Step 2: Server-side lookup — Admin SDK bypasses Firestore security rules
+            const res = await fetch("/api/auth/employee-login", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ idToken }),
+            });
 
-            for (const tenantDoc of tenantsSnapshot.docs) {
-                const employeesRef = collection(db, "tenants", tenantDoc.id, "employees");
-                const q = query(employeesRef, where("email", "==", email));
-                const empSnapshot = await getDocs(q);
-
-                if (!empSnapshot.empty) {
-                    emailFound = true;
-                    empSnapshot.forEach((doc) => {
-                        const data = doc.data();
-                        if (data.password === password) {
-                            employeeData = { id: doc.id, ...data, tenantId: tenantDoc.id };
-                        }
-                    });
-                    break;
-                }
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                setEmployeeError(data.error || "Login failed. Please try again.");
+                await auth.signOut();
+                return;
             }
 
-            if (employeeData) {
-                sessionStorage.setItem("employeeSession", JSON.stringify(employeeData));
-                router.push("/employee-dashboard");
-            } else {
-                setEmployeeError(emailFound
-                    ? "Invalid credentials. Please check your email and password."
-                    : "No employee account found with this email.");
-            }
-        } catch (error) {
+            const { employee } = await res.json();
+            sessionStorage.setItem("employeeSession", JSON.stringify(employee));
+            router.push("/employee-dashboard");
+
+        } catch (error: any) {
             console.error("Employee login error:", error);
-            if (error instanceof Error && error.message.includes("index")) {
-                setEmployeeError("Database Index Missing. Open Console (F12) and click the Firebase link to create it.");
+            await auth.signOut().catch(() => {});
+            if (
+                error.code === "auth/user-not-found" ||
+                error.code === "auth/wrong-password" ||
+                error.code === "auth/invalid-credential"
+            ) {
+                setEmployeeError("Invalid email or password.");
             } else {
                 setEmployeeError("Login failed. Please try again.");
             }

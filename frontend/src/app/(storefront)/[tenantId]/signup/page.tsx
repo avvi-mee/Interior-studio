@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, use } from "react";
+import { useState, use } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -47,18 +47,13 @@ export default function CustomerSignupPage({ params }: { params: Promise<{ tenan
         setIsLoading(true);
 
         try {
-            // Resolve the actual Tenant ID (Admin UID) from the store slug
-            // 'tenantId' from params is just the slug (e.g. 'aviraj-interiors')
-            // we need the Firestore UID for the 'tenantId' field in 'users' collection
-            const { getTenantByStoreId } = await import("@/lib/firestoreHelpers");
-            const tenantData = await getTenantByStoreId(tenantId);
+            const { resolveTenant } = await import("@/lib/firestoreHelpers");
+            const tenantData = await resolveTenant(tenantId);
 
             if (!tenantData) {
                 throw new Error("Invalid store URL. Company not found.");
             }
 
-            // Pass the tenant document ID (not ownerUid) for consistency
-            // This allows customers to be linked to the same tenantId used for pricing_configs
             await signupWithEmail(email, password, name, mobile, tenantData.id || "");
 
             router.push(redirectUrl);
@@ -69,8 +64,6 @@ export default function CustomerSignupPage({ params }: { params: Promise<{ tenan
             setIsLoading(false);
         }
     };
-
-
 
     return (
         <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4 py-12">
@@ -85,8 +78,6 @@ export default function CustomerSignupPage({ params }: { params: Promise<{ tenan
                             {error}
                         </div>
                     )}
-
-
 
                     <form onSubmit={handleSignup} className="space-y-4">
                         <div className="space-y-2">

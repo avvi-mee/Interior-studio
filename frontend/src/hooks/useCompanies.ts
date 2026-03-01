@@ -1,41 +1,41 @@
 "use client";
 
 import { useState, useMemo } from "react";
-import { getSupabase } from "@/lib/supabase";
+import { getDb } from "@/lib/firebase";
+import { collection, query, orderBy } from "firebase/firestore";
 import { Tenant } from "@/lib/firestoreHelpers";
-import { useRealtimeQuery } from "@/lib/supabaseQuery";
+import { useFirestoreQuery } from "@/lib/firestoreQuery";
 
-function mapRow(row: any): Tenant {
+function mapDocToTenant(snap: any): Tenant {
+  const data = snap.data() || {};
   return {
-    id: row.id,
-    ownerId: row.owner_id,
-    name: row.name,
-    email: row.email,
-    phone: row.phone,
-    slug: row.slug,
-    status: row.status,
-    createdAt: row.created_at,
-    approvedAt: row.approved_at,
-    subscription: row.subscription ?? row.subscription_plan ?? "free",
-    settings: row.settings,
+    id: snap.id,
+    ownerId: data.ownerId || data.owner_id,
+    name: data.name || "",
+    email: data.email || "",
+    phone: data.phone,
+    slug: data.slug || "",
+    status: data.status || "pending",
+    createdAt: data.createdAt || data.created_at || "",
+    approvedAt: data.approvedAt || data.approved_at,
+    subscription: data.subscription || "free",
+    settings: data.settings,
   };
 }
 
 export function useCompanies() {
   const [searchQuery, setSearchQuery] = useState("");
+  const db = getDb();
 
-  const { data: companies = [], isLoading: loading } = useRealtimeQuery<Tenant[]>({
+  const companiesQuery = useMemo(
+    () => query(collection(db, "tenants"), orderBy("createdAt", "desc")),
+    [db]
+  );
+
+  const { data: companies = [], isLoading: loading } = useFirestoreQuery<Tenant>({
     queryKey: ["companies"],
-    queryFn: async () => {
-      const supabase = getSupabase();
-      const { data, error } = await supabase
-        .from("tenants")
-        .select("*")
-        .order("created_at", { ascending: false });
-      if (error) throw error;
-      return (data ?? []).map(mapRow);
-    },
-    table: "tenants",
+    collectionRef: companiesQuery,
+    mapDoc: mapDocToTenant,
   });
 
   const filteredCompanies = useMemo(() => {

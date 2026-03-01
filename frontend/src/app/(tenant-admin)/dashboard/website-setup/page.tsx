@@ -1,35 +1,62 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useTenantAuth } from "@/hooks/useTenantAuth";
-import { Loader2, ExternalLink, Copy, Check } from "lucide-react";
+import { Loader2, ExternalLink, Copy, Check, Eye } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
+import { getTenantUrl } from "@/lib/tenantUrl";
 
 // Import tab components
 import BrandTab from "@/components/dashboard/website-builder/BrandTab";
 import ThemeTab from "@/components/dashboard/website-builder/ThemeTab";
 import PagesTab from "@/components/dashboard/website-builder/PagesTab";
 import MediaTab from "@/components/dashboard/website-builder/MediaTab";
+import PricingTab from "@/components/dashboard/website-builder/PricingTab";
+import PreviewPanel from "@/components/dashboard/website-builder/PreviewPanel";
 
 export default function WebsiteSetupPage() {
     const { tenant } = useTenantAuth();
     const { toast } = useToast();
     const [copied, setCopied] = useState(false);
+    const [previewOpen, setPreviewOpen] = useState(false);
+    const [generatedSlug, setGeneratedSlug] = useState<string | null>(null);
+    const [slugAttempted, setSlugAttempted] = useState(false);
 
-    const publicUrl = `${typeof window !== "undefined" ? window.location.origin : ""}/${tenant?.storeId || ""}`;
+    // Use slug (from Firestore or freshly generated), fall back to tenant ID
+    const urlIdentifier = tenant?.slug || generatedSlug || tenant?.id || "";
+    const publicUrl = urlIdentifier ? getTenantUrl(urlIdentifier) : "";
+
+    // Auto-generate slug via API if tenant has no slug
+    const ensureSlug = useCallback(async () => {
+        if (!tenant || tenant.slug || generatedSlug || slugAttempted) return;
+        setSlugAttempted(true);
+        try {
+            const res = await fetch("/api/ensure-slug", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ tenantId: tenant.id, tenantName: tenant.name }),
+            });
+            const data = await res.json();
+            if (res.ok && data.slug) {
+                setGeneratedSlug(data.slug);
+            }
+        } catch (err) {
+            console.error("Slug generation failed:", err);
+        }
+    }, [tenant, generatedSlug, slugAttempted]);
+
+    useEffect(() => {
+        ensureSlug();
+    }, [ensureSlug]);
 
     const copyToClipboard = () => {
         navigator.clipboard.writeText(publicUrl);
         setCopied(true);
         toast({ title: "Copied!", description: "Public URL copied to clipboard." });
         setTimeout(() => setCopied(false), 2000);
-    };
-
-    const openWebsite = () => {
-        window.open(publicUrl, "_blank");
     };
 
     if (!tenant) {
@@ -61,7 +88,14 @@ export default function WebsiteSetupPage() {
                                     Your Website URL
                                 </span>
                             </div>
-                            <p className="text-lg font-mono">{publicUrl}</p>
+                            <a
+                                href={publicUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-lg font-mono text-blue-300 hover:text-blue-100 underline underline-offset-4 transition-colors"
+                            >
+                                {publicUrl}
+                            </a>
                         </div>
                         <div className="flex gap-2">
                             <Button
@@ -70,17 +104,22 @@ export default function WebsiteSetupPage() {
                                 onClick={copyToClipboard}
                                 className="bg-white/10 hover:bg-white/20 text-white border-white/20"
                             >
-                                {copied ? (
-                                    <Check className="h-4 w-4 mr-2" />
-                                ) : (
-                                    <Copy className="h-4 w-4 mr-2" />
-                                )}
+                                {copied ? <Check className="h-4 w-4 mr-2" /> : <Copy className="h-4 w-4 mr-2" />}
                                 {copied ? "Copied" : "Copy"}
                             </Button>
                             <Button
                                 variant="secondary"
                                 size="sm"
-                                onClick={openWebsite}
+                                onClick={() => setPreviewOpen(true)}
+                                className="bg-white/10 hover:bg-white/20 text-white border-white/20"
+                            >
+                                <Eye className="h-4 w-4 mr-2" />
+                                Preview
+                            </Button>
+                            <Button
+                                variant="secondary"
+                                size="sm"
+                                onClick={() => window.open(publicUrl, "_blank")}
                                 className="bg-white text-black hover:bg-gray-100"
                             >
                                 <ExternalLink className="h-4 w-4 mr-2" />
@@ -93,49 +132,23 @@ export default function WebsiteSetupPage() {
 
             {/* Main Tabs */}
             <Tabs defaultValue="brand" className="space-y-6">
-                <TabsList className="grid w-full grid-cols-4 h-12 bg-gray-100 rounded-xl p-1">
-                    <TabsTrigger
-                        value="brand"
-                        className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-sm"
-                    >
-                        Brand
-                    </TabsTrigger>
-                    <TabsTrigger
-                        value="pages"
-                        className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-sm"
-                    >
-                        Pages
-                    </TabsTrigger>
-                    <TabsTrigger
-                        value="theme"
-                        className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-sm"
-                    >
-                        Theme
-                    </TabsTrigger>
-                    <TabsTrigger
-                        value="media"
-                        className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-sm"
-                    >
-                        Media
-                    </TabsTrigger>
+                <TabsList className="grid w-full grid-cols-5 h-12 bg-gray-100 rounded-xl p-1">
+                    <TabsTrigger value="brand" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-sm">Brand</TabsTrigger>
+                    <TabsTrigger value="pages" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-sm">Pages</TabsTrigger>
+                    <TabsTrigger value="theme" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-sm">Theme</TabsTrigger>
+                    <TabsTrigger value="media" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-sm">Media</TabsTrigger>
+                    <TabsTrigger value="pricing" className="rounded-lg data-[state=active]:bg-white data-[state=active]:shadow-sm">Pricing</TabsTrigger>
                 </TabsList>
 
-                <TabsContent value="brand" className="space-y-6">
-                    <BrandTab tenantId={tenant.id} />
-                </TabsContent>
-
-                <TabsContent value="pages" className="space-y-6">
-                    <PagesTab tenantId={tenant.id} />
-                </TabsContent>
-
-                <TabsContent value="theme" className="space-y-6">
-                    <ThemeTab tenantId={tenant.id} />
-                </TabsContent>
-
-                <TabsContent value="media" className="space-y-6">
-                    <MediaTab tenantId={tenant.id} />
-                </TabsContent>
+                <TabsContent value="brand" className="space-y-6"><BrandTab tenantId={tenant.id} /></TabsContent>
+                <TabsContent value="pages" className="space-y-6"><PagesTab tenantId={tenant.id} /></TabsContent>
+                <TabsContent value="theme" className="space-y-6"><ThemeTab tenantId={tenant.id} /></TabsContent>
+                <TabsContent value="media" className="space-y-6"><MediaTab tenantId={tenant.id} /></TabsContent>
+                <TabsContent value="pricing" className="space-y-6"><PricingTab tenantId={tenant.id} /></TabsContent>
             </Tabs>
+
+            {/* Preview Panel */}
+            <PreviewPanel storeId={urlIdentifier} open={previewOpen} onClose={() => setPreviewOpen(false)} />
         </div>
     );
 }

@@ -245,13 +245,11 @@ function StorefrontLayoutInner({
                             </div>
                         ) : (
                             <div className="hidden md:flex items-center gap-2">
-                                <Button
-                                    variant="ghost"
-                                    onClick={() => openAuth("login")}
-                                    className="text-gray-600 hover:text-indigo-600 hover:bg-gray-50"
-                                >
-                                    Login / Sign Up
-                                </Button>
+                                <Link href={`/${tenantId}/login`}>
+                                    <Button variant="ghost" className="text-gray-600 hover:text-indigo-600 hover:bg-gray-50">
+                                        Login / Sign Up
+                                    </Button>
+                                </Link>
                             </div>
                         )}
                         <Link href={`/${tenantId}/book-consultation`}>
@@ -305,20 +303,22 @@ function StorefrontLayoutInner({
                             </div>
                         ) : (
                             <div className="flex flex-col gap-3 mt-4 border-t border-gray-100 pt-4">
-                                <Button
-                                    variant="ghost"
-                                    onClick={() => openAuth("login")}
-                                    className="w-full justify-start text-lg font-medium text-gray-800 hover:text-indigo-600"
-                                >
-                                    Log In
-                                </Button>
-                                <Button
-                                    variant="ghost"
-                                    onClick={() => openAuth("signup")}
-                                    className="w-full justify-start text-lg font-medium text-gray-800 hover:text-indigo-600"
-                                >
-                                    Sign Up
-                                </Button>
+                                <Link href={`/${tenantId}/login`} onClick={() => setMobileMenuOpen(false)}>
+                                    <Button
+                                        variant="ghost"
+                                        className="w-full justify-start text-lg font-medium text-gray-800 hover:text-indigo-600"
+                                    >
+                                        Log In
+                                    </Button>
+                                </Link>
+                                <Link href={`/${tenantId}/estimate`} onClick={() => setMobileMenuOpen(false)}>
+                                    <Button
+                                        variant="ghost"
+                                        className="w-full justify-start text-lg font-medium text-gray-800 hover:text-indigo-600"
+                                    >
+                                        Sign Up (Get Estimate)
+                                    </Button>
+                                </Link>
                             </div>
                         )}
                         <div className="flex flex-col gap-3 mt-4">

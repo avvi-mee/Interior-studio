@@ -12,25 +12,29 @@ import {
     LogOut,
     Plus,
     Globe,
-    Sliders,
     Users,
-    Briefcase
+    Briefcase,
+    DollarSign,
+    BarChart3,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useTenantAuth } from "@/hooks/useTenantAuth";
 import { useBrand } from "@/hooks/useWebsiteBuilder";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
+import { getAllowedSidebarHrefs } from "@/lib/permissions";
 
 
 const SIDEBAR_ITEMS = [
     { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
+    { label: "Sales Pipeline", href: "/dashboard/orders", icon: ShoppingBag },
     { label: "Projects", href: "/dashboard/projects", icon: Briefcase },
-    { label: "Orders", href: "/dashboard/orders", icon: ShoppingBag },
+    { label: "Finance", href: "/dashboard/finance", icon: DollarSign },
     { label: "Customers", href: "/dashboard/customers", icon: Users },
+    { label: "Analytics", href: "/dashboard/analytics", icon: BarChart3 },
     { label: "Consultation Requests", href: "/dashboard/consultation-requests", icon: MessageSquare },
-    { label: "Pricing & Configuration", href: "/dashboard/pricing", icon: Sliders },
     { label: "Website Setup", href: "/dashboard/website-setup", icon: Globe },
-    { label: "Employees", href: "/dashboard/employees", icon: Users }, // Changed icon to avoid duplicate Briefcase if desired, or keep as is
+    { label: "Employees", href: "/dashboard/employees", icon: Users },
     { label: "Settings", href: "/dashboard/settings", icon: Settings },
 ];
 
@@ -39,6 +43,13 @@ export default function TenantLayout({ children }: { children: React.ReactNode }
     const router = useRouter();
     const { tenant, loading, isAuthenticated, logout } = useTenantAuth();
     const { brand } = useBrand(tenant?.id || "");
+    const { roles } = useCurrentUser();
+
+    // Filter sidebar items based on user roles
+    const allowedHrefs = getAllowedSidebarHrefs(roles.length > 0 ? roles : ["owner"]);
+    const filteredSidebarItems = SIDEBAR_ITEMS.filter(
+        (item) => allowedHrefs.has(item.href)
+    );
 
     useEffect(() => {
         if (!loading && !isAuthenticated) {
@@ -89,7 +100,7 @@ export default function TenantLayout({ children }: { children: React.ReactNode }
                     <div className="mb-6">
                         <label className="text-[10px] font-bold text-gray-400 uppercase tracking-wider block mb-1">Workspace</label>
                         <div className="p-2 border rounded-md bg-gray-50 flex items-center justify-between cursor-pointer">
-                            <span className="text-sm font-medium truncate">{tenant?.businessName || "Amit Interiors"}</span>
+                            <span className="text-sm font-medium truncate">{tenant?.name || "Amit Interiors"}</span>
                         </div>
                     </div>
 
@@ -106,7 +117,7 @@ export default function TenantLayout({ children }: { children: React.ReactNode }
                     </Button>
 
                     <nav className="space-y-1">
-                        {SIDEBAR_ITEMS.map((item) => {
+                        {filteredSidebarItems.map((item) => {
                             const isActive = pathname === item.href;
                             const Icon = item.icon;
 

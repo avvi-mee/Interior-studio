@@ -2,8 +2,20 @@
 
 import { useCallback, useMemo } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { getSupabase } from "@/lib/supabase";
-import { useRealtimeQuery } from "@/lib/supabaseQuery";
+import { getDb } from "@/lib/firebase";
+import {
+  collection,
+  doc,
+  query,
+  orderBy,
+  limit as firestoreLimit,
+  getDocs,
+  addDoc,
+  updateDoc,
+  serverTimestamp,
+  writeBatch,
+} from "firebase/firestore";
+import { useFirestoreQuery } from "@/lib/firestoreQuery";
 import { createProjectFromLead } from "@/lib/services/projectService";
 import { calculateLeadScore, LeadScoringInput } from "@/lib/services/leadScoringService";
 import { hasAnyRole } from "@/lib/permissions";
@@ -16,11 +28,13 @@ export interface Lead {
   phone: string;
   city?: string;
   stage: "new" | "contacted" | "qualified" | "proposal_sent" | "negotiation" | "won" | "lost";
+  status?: "active" | "converted" | "closed";
   source: "website" | "consultation" | "referral" | "manual" | "import";
   score: number;
-  temperature: "hot" | "warm" | "cold"; // GENERATED from score — read-only
+  temperature: "hot" | "warm" | "cold";
   estimatedValue: number;
-  assignedTo?: string; // references tenant_users.id
+  assignedTo?: string;
+  customerId?: string | null;
   estimateId?: string;
   projectId?: string;
   nextFollowUp?: any;
@@ -84,41 +98,47 @@ export function canModifyLead(
   return false;
 }
 
-// --- Column selection for leads queries ---
+// --- Helper: compute temperature from score ---
 
-const LEAD_COLUMNS =
-  "id,tenant_id,name,email,phone,city,stage,source,score,temperature,estimated_value,assigned_to,estimate_id,project_id,next_follow_up,follow_up_count,last_contacted_at,lost_reason,notes,created_at,updated_at";
+function computeTemperature(score: number): "hot" | "warm" | "cold" {
+  if (score >= 70) return "hot";
+  if (score >= 40) return "warm";
+  return "cold";
+}
 
-// --- Helper: map DB row to Lead ---
+// --- Helper: map Firestore doc to Lead ---
 
-function mapRowToLead(row: any, activityLogs: any[] = []): Lead {
+function mapDocToLead(id: string, data: any, activityLogs: any[] = []): Lead {
+  const score = data.score ?? 0;
   return {
-    id: row.id,
-    tenantId: row.tenant_id ?? "",
-    name: row.name ?? "",
-    email: row.email ?? "",
-    phone: row.phone ?? "",
-    city: row.city ?? undefined,
-    stage: row.stage ?? "new",
-    source: row.source ?? "website",
-    score: row.score ?? 0,
-    temperature: row.temperature ?? "cold",
-    estimatedValue: row.estimated_value ?? 0,
-    assignedTo: row.assigned_to ?? undefined,
-    estimateId: row.estimate_id ?? undefined,
-    projectId: row.project_id ?? undefined,
-    nextFollowUp: row.next_follow_up ?? undefined,
-    followUpCount: row.follow_up_count ?? 0,
-    lastContactedAt: row.last_contacted_at ?? undefined,
-    lostReason: row.lost_reason ?? undefined,
-    notes: row.notes ?? undefined,
-    createdAt: row.created_at ?? null,
-    updatedAt: row.updated_at ?? undefined,
+    id,
+    tenantId: data.tenantId ?? "",
+    name: data.name ?? "",
+    email: data.email ?? "",
+    phone: data.phone ?? "",
+    city: data.city ?? undefined,
+    stage: data.stage ?? "new",
+    status: data.status ?? "active",
+    source: data.source ?? "website",
+    score,
+    temperature: computeTemperature(score),
+    estimatedValue: data.estimatedValue ?? 0,
+    customerId: data.customerId ?? null,
+    assignedTo: data.assignedTo ?? undefined,
+    estimateId: data.estimateId ?? undefined,
+    projectId: data.projectId ?? undefined,
+    nextFollowUp: data.nextFollowUp ?? undefined,
+    followUpCount: data.followUpCount ?? 0,
+    lastContactedAt: data.lastContactedAt ?? undefined,
+    lostReason: data.lostReason ?? undefined,
+    notes: data.notes ?? undefined,
+    createdAt: data.createdAt ?? null,
+    updatedAt: data.updatedAt ?? undefined,
     timeline: activityLogs.map((e: any) => ({
       action: e.action ?? "",
       summary: e.summary ?? "",
-      timestamp: e.created_at ?? null,
-      actorId: e.actor_id ?? undefined,
+      timestamp: e.createdAt ?? null,
+      actorId: e.actorId ?? undefined,
     })),
   };
 }
@@ -164,54 +184,25 @@ const EMPTY_STATS: LeadStats = {
 export function useLeads(tenantId: string | null) {
   const queryClient = useQueryClient();
   const qk = ["leads", tenantId] as const;
+  const db = getDb();
 
-  const { data: leads = [], isLoading: loading } = useRealtimeQuery<Lead[]>({
+  const leadsQuery = useMemo(() => {
+    if (!tenantId) return null;
+    return query(
+      collection(db, `tenants/${tenantId}/leads`),
+      orderBy("createdAt", "desc"),
+      firestoreLimit(100)
+    );
+  }, [db, tenantId]);
+
+  const { data: leads = [], isLoading: loading } = useFirestoreQuery<Lead>({
     queryKey: qk,
-    queryFn: async () => {
-      const supabase = getSupabase();
-
-      // Fetch leads with explicit column selection (paginated — first 100)
-      const { data: leadsData, error: leadsError } = await supabase
-        .from("leads")
-        .select(LEAD_COLUMNS)
-        .eq("tenant_id", tenantId!)
-        .order("created_at", { ascending: false })
-        .range(0, 99);
-
-      if (leadsError) throw leadsError;
-
-      const rows = leadsData ?? [];
-
-      // Fetch all activity logs for these leads in one query
-      const leadIds = rows.map((r: any) => r.id);
-      let activityMap: Record<string, any[]> = {};
-
-      if (leadIds.length > 0) {
-        const { data: activityData } = await supabase
-          .from("activity_logs")
-          .select("entity_id,action,summary,actor_id,created_at")
-          .eq("entity_type", "lead")
-          .in("entity_id", leadIds)
-          .order("created_at", { ascending: true });
-
-        if (activityData) {
-          for (const event of activityData) {
-            if (!activityMap[event.entity_id]) {
-              activityMap[event.entity_id] = [];
-            }
-            activityMap[event.entity_id].push(event);
-          }
-        }
-      }
-
-      return rows.map((row: any) => mapRowToLead(row, activityMap[row.id] ?? []));
+    collectionRef: leadsQuery!,
+    mapDoc: (snap) => {
+      const data = snap.data() || {};
+      return mapDocToLead(snap.id, data);
     },
-    table: "leads",
-    filter: `tenant_id=eq.${tenantId}`,
-    enabled: !!tenantId,
-    additionalTables: [
-      { table: "activity_logs", filter: "entity_type=eq.lead" },
-    ],
+    enabled: !!tenantId && !!leadsQuery,
   });
 
   const invalidate = useCallback(
@@ -219,7 +210,7 @@ export function useLeads(tenantId: string | null) {
     [queryClient, qk]
   );
 
-  // Derive stats from leads via useMemo (replaces the old setState-based stats)
+  // Derive stats from leads via useMemo
   const stats = useMemo<LeadStats>(() => {
     if (!leads || leads.length === 0) return EMPTY_STATS;
     return computeStats(leads);
@@ -239,12 +230,11 @@ export function useLeads(tenantId: string | null) {
       lastContactedAt: lead.lastContactedAt,
     };
     const { score } = calculateLeadScore(input);
-    const supabase = getSupabase();
-    // Only write score — temperature is a GENERATED column derived from score
-    await supabase
-      .from("leads")
-      .update({ score, updated_at: new Date().toISOString() })
-      .eq("id", lead.id);
+    const db = getDb();
+    await updateDoc(doc(db, `tenants/${tenantId}/leads`, lead.id), {
+      score,
+      updatedAt: serverTimestamp(),
+    });
     invalidate();
   }, [tenantId, invalidate]);
 
@@ -263,41 +253,18 @@ export function useLeads(tenantId: string | null) {
           if (lead && !canModifyLead(lead, currentUserId, userRoles)) return false;
         }
 
-        // Map camelCase Lead fields to snake_case DB columns
-        const dbUpdates: Record<string, any> = { updated_at: new Date().toISOString() };
-        const fieldMap: Record<string, string> = {
-          tenantId: "tenant_id",
-          estimatedValue: "estimated_value",
-          estimateId: "estimate_id",
-          lostReason: "lost_reason",
-          assignedTo: "assigned_to",
-          nextFollowUp: "next_follow_up",
-          followUpCount: "follow_up_count",
-          lastContactedAt: "last_contacted_at",
-          projectId: "project_id",
-          createdAt: "created_at",
-          updatedAt: "updated_at",
-        };
+        // Fields that should never be written (read-only / computed)
+        const readOnlyFields = new Set(["id", "timeline", "temperature", "tenantId"]);
 
-        // Fields that should never be written (read-only / generated)
-        const readOnlyFields = new Set(["id", "timeline", "temperature"]);
+        const dbUpdates: Record<string, any> = { updatedAt: serverTimestamp() };
 
         for (const [key, value] of Object.entries(updates)) {
           if (readOnlyFields.has(key)) continue;
-          const dbKey = fieldMap[key] || key;
-          dbUpdates[dbKey] = value;
+          dbUpdates[key] = value;
         }
 
-        const supabase = getSupabase();
-        const { error } = await supabase
-          .from("leads")
-          .update(dbUpdates)
-          .eq("id", leadId);
-
-        if (error) {
-          console.error("Error updating lead:", error);
-          return false;
-        }
+        const db = getDb();
+        await updateDoc(doc(db, `tenants/${tenantId}/leads`, leadId), dbUpdates);
         invalidate();
         return true;
       } catch (error) {
@@ -317,27 +284,19 @@ export function useLeads(tenantId: string | null) {
     ) => {
       if (!tenantId) return false;
       try {
-        const supabase = getSupabase();
+        const db = getDb();
 
-        const { error } = await supabase.from("activity_logs").insert({
-          tenant_id: tenantId,
-          entity_type: "lead",
-          entity_id: leadId,
+        await addDoc(collection(db, `tenants/${tenantId}/leads/${leadId}/activityLog`), {
           action,
           summary,
-          actor_id: actorId || null,
+          actorId: actorId || null,
+          createdAt: serverTimestamp(),
         });
 
-        if (error) {
-          console.error("Error adding activity log:", error);
-          return false;
-        }
-
-        // Also bump updated_at on the lead
-        await supabase
-          .from("leads")
-          .update({ updated_at: new Date().toISOString() })
-          .eq("id", leadId);
+        // Also bump updatedAt on the lead
+        await updateDoc(doc(db, `tenants/${tenantId}/leads`, leadId), {
+          updatedAt: serverTimestamp(),
+        });
 
         invalidate();
         return true;
@@ -353,30 +312,19 @@ export function useLeads(tenantId: string | null) {
     async (leadId: string, userId: string) => {
       if (!tenantId) return false;
       try {
-        const supabase = getSupabase();
-        const now = new Date().toISOString();
+        const db = getDb();
 
-        const { error: updateError } = await supabase
-          .from("leads")
-          .update({
-            assigned_to: userId,
-            updated_at: now,
-          })
-          .eq("id", leadId);
-
-        if (updateError) {
-          console.error("Error assigning lead:", updateError);
-          return false;
-        }
+        await updateDoc(doc(db, `tenants/${tenantId}/leads`, leadId), {
+          assignedTo: userId,
+          updatedAt: serverTimestamp(),
+        });
 
         // Insert activity log
-        await supabase.from("activity_logs").insert({
-          tenant_id: tenantId,
-          entity_type: "lead",
-          entity_id: leadId,
+        await addDoc(collection(db, `tenants/${tenantId}/leads/${leadId}/activityLog`), {
           action: "assigned",
           summary: `Lead assigned to user ${userId}`,
-          actor_id: null,
+          actorId: null,
+          createdAt: serverTimestamp(),
         });
 
         // Recalculate score after assignment
@@ -401,7 +349,8 @@ export function useLeads(tenantId: string | null) {
       newStage: string,
       note?: string,
       currentUserId?: string | null,
-      userRoles?: string[]
+      userRoles?: string[],
+      tenantMeta?: { email?: string; businessName?: string }
     ) => {
       const lead = leads.find((l) => l.id === leadId);
       if (!lead) return false;
@@ -412,49 +361,60 @@ export function useLeads(tenantId: string | null) {
       // Assignment enforcement (only when caller passes user context)
       if (currentUserId !== undefined && userRoles) {
         if (!canModifyLead(lead, currentUserId, userRoles)) return false;
+        // Conversion to "won" is restricted to owner / project_manager
+        if (newStage === "won" && !hasAnyRole(userRoles, ["owner", "project_manager"])) {
+          return false;
+        }
       }
 
       try {
-        const supabase = getSupabase();
-        const now = new Date().toISOString();
+        const db = getDb();
 
         const updates: Record<string, any> = {
           stage: newStage,
-          updated_at: now,
+          updatedAt: serverTimestamp(),
         };
 
         if (newStage === "contacted" || newStage === "qualified") {
-          updates.last_contacted_at = now;
+          updates.lastContactedAt = serverTimestamp();
         }
 
         if (newStage === "lost" && note) {
-          updates.lost_reason = note;
+          updates.lostReason = note;
         }
 
-        const { error: updateError } = await supabase
-          .from("leads")
-          .update(updates)
-          .eq("id", leadId);
-
-        if (updateError) {
-          console.error("Error changing stage:", updateError);
-          return false;
-        }
-
-        // Insert activity log
-        await supabase.from("activity_logs").insert({
-          tenant_id: tenantId,
-          entity_type: "lead",
-          entity_id: leadId,
+        // Atomic: lead update + activity log
+        const batch = writeBatch(db);
+        batch.update(doc(db, `tenants/${tenantId}/leads`, leadId), updates);
+        const logRef = doc(collection(db, `tenants/${tenantId}/leads/${leadId}/activityLog`));
+        batch.set(logRef, {
           action: "status_changed",
           summary: `Stage changed to ${newStage}${note ? `: ${note}` : ""}`,
-          actor_id: currentUserId || null,
+          actorId: currentUserId || null,
+          createdAt: serverTimestamp(),
         });
+        await batch.commit();
 
         // Double-conversion guard: skip createProjectFromLead if projectId exists
         if (newStage === "won" && tenantId && !lead.projectId) {
           try {
             await createProjectFromLead(lead, tenantId);
+
+            // Fire-and-forget: notify owner and client of the conversion
+            fetch("/api/send-email", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                type: "lead_won",
+                tenantId,
+                tenantEmail: tenantMeta?.email ?? null,
+                tenantBusinessName: tenantMeta?.businessName ?? null,
+                leadName: lead.name,
+                clientEmail: lead.email || null,
+                phone: lead.phone || null,
+                estimatedValue: lead.estimatedValue || 0,
+              }),
+            }).catch((err) => console.error("Lead won notification failed:", err));
           } catch (err) {
             console.error("Error creating project from lead:", err);
           }
@@ -477,7 +437,7 @@ export function useLeads(tenantId: string | null) {
     async (data: Omit<Lead, "id" | "createdAt" | "updatedAt" | "temperature" | "timeline">) => {
       if (!tenantId) return null;
       try {
-        // Compute initial score (temperature is GENERATED from score in DB)
+        // Compute initial score (temperature is computed client-side from score)
         const input: LeadScoringInput = {
           totalAmount: data.estimatedValue,
           stage: data.stage,
@@ -489,41 +449,32 @@ export function useLeads(tenantId: string | null) {
         };
         const { score } = calculateLeadScore(input);
 
-        const now = new Date().toISOString();
-        const supabase = getSupabase();
+        const db = getDb();
 
-        const { data: inserted, error } = await supabase
-          .from("leads")
-          .insert({
-            tenant_id: tenantId,
-            name: data.name,
-            email: data.email,
-            phone: data.phone,
-            city: data.city || null,
-            stage: data.stage,
-            source: data.source,
-            score,
-            estimated_value: data.estimatedValue,
-            estimate_id: data.estimateId || null,
-            assigned_to: data.assignedTo || null,
-            next_follow_up: data.nextFollowUp || null,
-            follow_up_count: data.followUpCount,
-            last_contacted_at: data.lastContactedAt || null,
-            project_id: data.projectId || null,
-            lost_reason: data.lostReason || null,
-            notes: data.notes || null,
-            created_at: now,
-            updated_at: now,
-          })
-          .select()
-          .single();
+        const docRef = await addDoc(collection(db, `tenants/${tenantId}/leads`), {
+          tenantId,
+          name: data.name,
+          email: data.email,
+          phone: data.phone,
+          city: data.city || null,
+          stage: data.stage,
+          source: data.source,
+          score,
+          estimatedValue: data.estimatedValue,
+          estimateId: data.estimateId || null,
+          assignedTo: data.assignedTo || null,
+          nextFollowUp: data.nextFollowUp || null,
+          followUpCount: data.followUpCount,
+          lastContactedAt: data.lastContactedAt || null,
+          projectId: data.projectId || null,
+          lostReason: data.lostReason || null,
+          notes: data.notes || null,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
 
-        if (error) {
-          console.error("Error creating lead:", error);
-          return null;
-        }
         invalidate();
-        return inserted?.id ?? null;
+        return docRef.id;
       } catch (error) {
         console.error("Error creating lead:", error);
         return null;

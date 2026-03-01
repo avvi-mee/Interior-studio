@@ -1,6 +1,7 @@
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
-import { db, storage } from "@/lib/firebase";
+import { getDb } from "@/lib/firebase";
+import { getFirebaseStorage } from "@/lib/firebase";
 import { doc, getDoc, updateDoc, collection, query, where, getDocs } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 
@@ -38,36 +39,29 @@ export async function generateEstimatePDF(
     options: { download?: boolean; uploadToStorage?: boolean; tenantId?: string } = { download: true, uploadToStorage: true }
 ): Promise<{ success: boolean; pdfUrl?: string }> {
     try {
-        // Find estimate in tenant subcollection
-        // We need to search across all tenants or have the tenantId passed in
-        // For now, we'll try to find it in the estimates collection directly
+        const db = getDb();
+
+        // Find estimate in tenant's estimates collection
         let estimateData: EstimateData | null = null;
-        let estimateDocPath = "";
 
-        // Try to find the estimate by searching all tenants
         if (options.tenantId) {
-            const estimateRef = doc(db, `tenants/${options.tenantId}/estimates/${estimateId}`);
+            const estimateRef = doc(db, `tenants/${options.tenantId}/estimates`, estimateId);
             const estimateSnap = await getDoc(estimateRef);
+
             if (estimateSnap.exists()) {
-                estimateData = estimateSnap.data() as EstimateData;
-                estimateDocPath = estimateRef.path;
-            }
-        }
-
-        if (!estimateData) {
-            // Try secondary search by searching all tenants if not found or tenantId not provided
-            const tenantsRef = collection(db, "tenants");
-            const tenantsSnap = await getDocs(tenantsRef);
-
-            for (const tenantDoc of tenantsSnap.docs) {
-                const estimateRef = doc(db, `tenants/${tenantDoc.id}/estimates/${estimateId}`);
-                const estimateSnap = await getDoc(estimateRef);
-
-                if (estimateSnap.exists()) {
-                    estimateData = estimateSnap.data() as EstimateData;
-                    estimateDocPath = estimateRef.path;
-                    break;
-                }
+                const data = estimateSnap.data();
+                estimateData = {
+                    customerInfo: data.customer_info,
+                    segment: data.project_summary?.segment,
+                    plan: data.project_summary?.plan,
+                    carpetArea: data.project_summary?.carpetArea,
+                    bedrooms: data.project_summary?.bedrooms,
+                    bathrooms: data.project_summary?.bathrooms,
+                    configuration: data.project_summary?.configuration,
+                    totalAmount: data.total_amount,
+                    tenantId: data.tenant_id || options.tenantId,
+                    createdAt: data.created_at,
+                };
             }
         }
 
@@ -96,7 +90,7 @@ export async function generateEstimatePDF(
         pdf.setFontSize(9);
         pdf.setTextColor(100, 100, 100);
         pdf.text(`Estimate ID: ${estimateId.slice(0, 12)}`, 14, 45);
-        pdf.text(`Date: ${estimateData.createdAt?.toDate ? estimateData.createdAt.toDate().toLocaleDateString() : new Date().toLocaleDateString()}`, 14, 50);
+        pdf.text(`Date: ${estimateData.createdAt ? new Date(estimateData.createdAt).toLocaleDateString() : new Date().toLocaleDateString()}`, 14, 50);
 
         // Client Information Section
         pdf.setFontSize(12);
@@ -165,9 +159,9 @@ export async function generateEstimatePDF(
         pdf.text("Item Breakdown", 14, currentY);
 
         // Fetch pricing config to get item names
-        const pricingConfigRef = doc(db, "pricing_configs", estimateData.tenantId);
-        const pricingConfigSnap = await getDoc(pricingConfigRef);
-        const pricingConfig = pricingConfigSnap.exists() ? pricingConfigSnap.data() : null;
+        const pricingRef = doc(db, `tenants/${estimateData.tenantId}/pricing/config`);
+        const pricingSnap = await getDoc(pricingRef);
+        const pricingConfig = pricingSnap.exists() ? pricingSnap.data() : null;
 
         const itemBreakdown: any[] = [];
 
@@ -227,8 +221,8 @@ export async function generateEstimatePDF(
                 Object.entries(bathroom.items).forEach(([itemId, quantity]) => {
                     if (quantity > 0) {
                         itemBreakdown.push([
-                            estimateData.segment === 'Commercial' ? `Bathroom Unit ${index + 1}` : `Bathroom ${index + 1}`,
-                            getItemName(estimateData.segment === 'Commercial' ? 'commercial_bathroom' : 'bathroom', itemId),
+                            estimateData!.segment === 'Commercial' ? `Bathroom Unit ${index + 1}` : `Bathroom ${index + 1}`,
+                            getItemName(estimateData!.segment === 'Commercial' ? 'commercial_bathroom' : 'bathroom', itemId),
                             quantity.toString()
                         ]);
                     }
@@ -321,15 +315,20 @@ export async function generateEstimatePDF(
         // Upload to Firebase Storage if enabled
         if (options.uploadToStorage) {
             try {
+                const storage = getFirebaseStorage();
                 const pdfBlob = pdf.output("blob");
-                const storageRef = ref(storage, `estimates/${estimateId}.pdf`);
-                await uploadBytes(storageRef, pdfBlob);
+                const storagePath = `estimates/${estimateId}.pdf`;
+                const storageRef = ref(storage, storagePath);
+
+                await uploadBytes(storageRef, pdfBlob, {
+                    contentType: "application/pdf",
+                });
+
                 pdfUrl = await getDownloadURL(storageRef);
 
-                // Update the estimate document with pdfUrl
-                if (estimateDocPath) {
-                    await updateDoc(doc(db, estimateDocPath), { pdfUrl });
-                }
+                // Update the estimate record with pdfUrl
+                const estimateDocRef = doc(db, `tenants/${estimateData.tenantId}/estimates`, estimateId);
+                await updateDoc(estimateDocRef, { pdf_url: pdfUrl });
             } catch (uploadError) {
                 console.error("Error uploading PDF to storage:", uploadError);
                 // Continue with download even if upload fails

@@ -19,6 +19,7 @@ import {
 import { useHomePage } from "@/hooks/useWebsiteBuilder";
 import { useToast } from "@/hooks/use-toast";
 import type { HeroSlide, CustomContentSection } from "@/types/website";
+import HomeSectionManager from "./HomeSectionManager";
 
 interface HomePageEditorProps {
     tenantId: string;
@@ -191,6 +192,9 @@ export default function HomePageEditor({ tenantId }: HomePageEditorProps) {
 
     return (
         <div className="space-y-8">
+            {/* Homepage Section Manager */}
+            <HomeSectionManager tenantId={tenantId} />
+
             {/* Hero Slider Section */}
             <Card className="rounded-xl shadow-sm border-gray-200">
                 <CardHeader className="pb-4">

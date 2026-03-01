@@ -1,9 +1,20 @@
 "use client";
 
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { getSupabase } from "@/lib/supabase";
-import { useRealtimeQuery } from "@/lib/supabaseQuery";
+import { getDb } from "@/lib/firebase";
+import {
+  collection,
+  doc,
+  query,
+  orderBy,
+  limit as firestoreLimit,
+  getDocs,
+  addDoc,
+  updateDoc,
+  serverTimestamp,
+} from "firebase/firestore";
+import { useFirestoreQuery } from "@/lib/firestoreQuery";
 import type { Project, ActivityLogEntry } from "@/lib/services/projectService";
 import { logActivity } from "@/lib/services/projectService";
 import type { Phase, Task, TaskAttachment, TaskComment } from "@/lib/services/taskTemplates";
@@ -12,172 +23,85 @@ import { uploadImage } from "@/lib/storageHelpers";
 export type { Project };
 
 // ---------------------------------------------------------------------------
-// v2: Table renames
-//   project_phases -> phases
-//   project_tasks  -> tasks
-//   timeline_events / project_activity_log -> activity_logs
-//   No more *_name denormalized columns
-//   tasks now have tenant_id (denorm for RLS)
+// Firebase/Firestore migration:
+//   projects → tenants/{tenantId}/projects
+//   phases   → tenants/{tenantId}/projects/{pid}/phases
+//   tasks    → tenants/{tenantId}/projects/{pid}/tasks (with phaseId field)
+//   task_attachments → tenants/{tenantId}/projects/{pid}/tasks/{tid}/attachments
+//   task_comments    → tenants/{tenantId}/projects/{pid}/tasks/{tid}/comments
+//   activity_logs    → tenants/{tenantId}/projects/{pid}/activityLog
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Row types (snake_case from Supabase)
-// ---------------------------------------------------------------------------
-interface ProjectRow {
-  id: string;
-  tenant_id: string;
-  lead_id: string;
-  estimate_id?: string;
-  name: string;
-  client_name: string;
-  client_email: string;
-  client_phone: string;
-  client_city?: string;
-  contract_value: number;
-  status: "planning" | "in_progress" | "on_hold" | "completed" | "cancelled";
-  manager_id?: string;
-  designer_id?: string;
-  supervisor_id?: string;
-  progress?: number;
-  start_date?: string;
-  target_end_date?: string;
-  actual_end_date?: string;
-  created_at: string;
-  updated_at?: string;
-}
-
-interface PhaseRow {
-  id: string;
-  project_id: string;
-  name: string;
-  sort_order: number;
-  status: "pending" | "in_progress" | "completed" | "skipped";
-  start_date?: string;
-  end_date?: string;
-}
-
-interface TaskRow {
-  id: string;
-  phase_id: string;
-  project_id: string;
-  tenant_id: string;
-  name: string;
-  sort_order: number;
-  status: "pending" | "in_progress" | "completed" | "blocked";
-  progress: number;
-  assignee_id?: string;
-  due_date?: string;
-  completed_at?: string;
-  notes?: string;
-}
-
-interface AttachmentRow {
-  id: string;
-  task_id: string;
-  name: string;
-  url: string;
-  uploaded_by: string;
-  created_at: string;
-}
-
-interface CommentRow {
-  id: string;
-  task_id: string;
-  text: string;
-  author_id: string;
-  created_at: string;
-  is_internal: boolean;
-}
-
-interface ActivityRow {
-  id: string;
-  entity_type: string;
-  entity_id: string;
-  action: string;
-  summary: string;
-  actor_id?: string;
-  metadata?: any;
-  created_at: string;
-}
-
-// ---------------------------------------------------------------------------
-// Column selections (avoid SELECT *)
-// ---------------------------------------------------------------------------
-const PROJECT_COLS = "id,tenant_id,lead_id,estimate_id,name,client_name,client_email,client_phone,client_city,contract_value,status,manager_id,designer_id,supervisor_id,progress,start_date,target_end_date,actual_end_date,created_at,updated_at";
-const PHASE_COLS = "id,project_id,name,sort_order,status,start_date,end_date";
-const TASK_COLS = "id,phase_id,project_id,tenant_id,name,sort_order,status,progress,assignee_id,due_date,completed_at,notes";
-const ATTACHMENT_COLS = "id,task_id,name,url,uploaded_by,created_at";
-const COMMENT_COLS = "id,task_id,text,author_id,created_at,is_internal";
-
-// ---------------------------------------------------------------------------
-// Mapping helpers
+// Mapping helpers (Firestore docs are camelCase)
 // ---------------------------------------------------------------------------
 
-function mapTaskRow(
-  row: TaskRow,
+function mapTaskDoc(
+  id: string,
+  data: any,
   attachments: TaskAttachment[],
   comments: TaskComment[]
 ): Task {
   return {
-    id: row.id,
-    name: row.name,
-    status: row.status,
-    progress: row.progress ?? 0,
-    assignedTo: row.assignee_id,
-    dueDate: row.due_date || undefined,
-    completedAt: row.completed_at || undefined,
-    notes: row.notes,
+    id,
+    name: data.name ?? "",
+    status: data.status ?? "pending",
+    progress: data.progress ?? 0,
+    assignedTo: data.assigneeId ?? data.assignedTo,
+    dueDate: data.dueDate || undefined,
+    completedAt: data.completedAt || undefined,
+    notes: data.notes,
     attachments,
     comments,
   };
 }
 
-function mapPhaseRow(row: PhaseRow, tasks: Task[]): Phase {
+function mapPhaseDoc(id: string, data: any, tasks: Task[]): Phase {
   return {
-    id: row.id,
-    name: row.name,
-    order: row.sort_order,
-    status: row.status,
+    id,
+    name: data.name ?? "",
+    order: data.sortOrder ?? 0,
+    status: data.status ?? "pending",
     tasks,
-    startDate: row.start_date || undefined,
-    endDate: row.end_date || undefined,
+    startDate: data.startDate || undefined,
+    endDate: data.endDate || undefined,
   };
 }
 
-function mapProjectRow(
-  row: ProjectRow,
+function mapProjectDoc(
+  id: string,
+  data: any,
   phases: Phase[],
   timeline: Project["timeline"]
 ): Project {
   return {
-    id: row.id,
-    tenantId: row.tenant_id,
-    leadId: row.lead_id,
-    estimateId: row.estimate_id,
-    clientName: row.client_name,
-    clientEmail: row.client_email,
-    clientPhone: row.client_phone,
-    clientCity: row.client_city,
-    totalAmount: row.contract_value,
-    status: row.status,
-    projectName: row.name,
-    // v2: role assignments point to tenant_users IDs
-    assignedDesigner: row.designer_id,
-    assignedSupervisor: row.supervisor_id,
-    assignedTo: row.manager_id,
+    id,
+    tenantId: data.tenantId ?? "",
+    leadId: data.leadId ?? "",
+    estimateId: data.estimateId,
+    clientName: data.clientName ?? "",
+    clientEmail: data.clientEmail ?? "",
+    clientPhone: data.clientPhone ?? "",
+    clientCity: data.clientCity,
+    totalAmount: data.contractValue ?? 0,
+    status: data.status ?? "planning",
+    projectName: data.name ?? "",
+    assignedDesigner: data.designerId,
+    assignedSupervisor: data.supervisorId,
+    assignedTo: data.managerId,
     phases,
-    startDate: row.start_date,
-    expectedEndDate: row.target_end_date,
-    completedDate: row.actual_end_date,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    startDate: data.startDate,
+    expectedEndDate: data.targetEndDate,
+    completedDate: data.actualEndDate,
+    createdAt: data.createdAt ?? "",
+    updatedAt: data.updatedAt,
     timeline,
-    projectProgress: row.progress,
+    projectProgress: data.progress,
   };
 }
 
 // ---------------------------------------------------------------------------
-// Enrichment: progress, overdue, health (computed from tasks -- no stored health_status)
+// Enrichment: progress, overdue, health (computed from tasks)
 // ---------------------------------------------------------------------------
 
 function enrichProjects(rawProjects: Project[]): Project[] {
@@ -241,159 +165,201 @@ function enrichProjects(rawProjects: Project[]): Project[] {
 }
 
 // ---------------------------------------------------------------------------
+// Helper: fetch subcollections for a project
+// ---------------------------------------------------------------------------
+
+async function fetchProjectSubcollections(
+  tenantId: string,
+  projectId: string
+): Promise<{
+  phases: Phase[];
+  timeline: Project["timeline"];
+}> {
+  const db = getDb();
+  const basePath = `tenants/${tenantId}/projects/${projectId}`;
+
+  // Fetch phases, tasks, and activity logs in parallel
+  const [phasesSnap, tasksSnap, activitySnap] = await Promise.all([
+    getDocs(query(collection(db, `${basePath}/phases`), orderBy("sortOrder", "asc"))),
+    getDocs(query(collection(db, `${basePath}/tasks`), orderBy("sortOrder", "asc"))),
+    getDocs(query(collection(db, `${basePath}/activityLog`), orderBy("createdAt", "desc"))),
+  ]);
+
+  // Build tasks with attachments/comments (fetched per task)
+  const taskIds = tasksSnap.docs.map((d) => d.id);
+  const attachmentsByTask = new Map<string, TaskAttachment[]>();
+  const commentsByTask = new Map<string, TaskComment[]>();
+
+  // Fetch attachments and comments for all tasks in parallel
+  if (taskIds.length > 0) {
+    const fetchPromises: Promise<void>[] = [];
+
+    for (const taskDoc of tasksSnap.docs) {
+      const taskId = taskDoc.id;
+      const taskPath = `${basePath}/tasks/${taskId}`;
+
+      fetchPromises.push(
+        getDocs(collection(db, `${taskPath}/attachments`)).then((snap) => {
+          const atts: TaskAttachment[] = snap.docs.map((d) => {
+            const data = d.data();
+            return {
+              name: data.name ?? "",
+              url: data.url ?? "",
+              uploadedAt: data.createdAt ?? "",
+              uploadedBy: data.uploadedBy ?? "",
+            };
+          });
+          if (atts.length > 0) attachmentsByTask.set(taskId, atts);
+        })
+      );
+
+      fetchPromises.push(
+        getDocs(query(collection(db, `${taskPath}/comments`), orderBy("createdAt", "asc"))).then((snap) => {
+          const comments: TaskComment[] = snap.docs.map((d) => {
+            const data = d.data();
+            return {
+              id: d.id,
+              text: data.text ?? "",
+              authorId: data.authorId ?? "",
+              authorName: "",
+              createdAt: data.createdAt ?? "",
+              isInternal: data.isInternal ?? false,
+            };
+          });
+          if (comments.length > 0) commentsByTask.set(taskId, comments);
+        })
+      );
+    }
+
+    await Promise.all(fetchPromises);
+  }
+
+  // Index tasks by phaseId
+  const tasksByPhase = new Map<string, Task[]>();
+  for (const taskDoc of tasksSnap.docs) {
+    const data = taskDoc.data();
+    const phaseId = data.phaseId;
+    const list = tasksByPhase.get(phaseId) || [];
+    list.push(
+      mapTaskDoc(
+        taskDoc.id,
+        data,
+        attachmentsByTask.get(taskDoc.id) || [],
+        commentsByTask.get(taskDoc.id) || []
+      )
+    );
+    tasksByPhase.set(phaseId, list);
+  }
+
+  // Build phases
+  const phases = phasesSnap.docs.map((phaseDoc) => {
+    const data = phaseDoc.data();
+    return mapPhaseDoc(phaseDoc.id, data, tasksByPhase.get(phaseDoc.id) || []);
+  });
+
+  // Build timeline
+  const timeline: Project["timeline"] = activitySnap.docs.map((alDoc) => {
+    const data = alDoc.data();
+    return {
+      id: alDoc.id,
+      action: data.summary || data.action || "",
+      timestamp: data.createdAt ?? "",
+      updatedBy: data.actorId,
+      note: data.summary,
+    };
+  });
+
+  return { phases, timeline };
+}
+
+// ---------------------------------------------------------------------------
+// Status notification helper (fire-and-forget)
+// ---------------------------------------------------------------------------
+
+function sendStatusNotification(payload: {
+  tenantId: string;
+  projectId: string;
+  clientEmail: string;
+  clientName: string;
+  projectName: string;
+  statusType: "project" | "phase";
+  entityName: string;
+  newStatus: string;
+}) {
+  fetch("/api/status-notification", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }).catch((err) => console.error("Status notification failed:", err));
+}
+
+// ---------------------------------------------------------------------------
 // Hook
 // ---------------------------------------------------------------------------
 
 export function useProjects(tenantId: string | null) {
   const queryClient = useQueryClient();
   const qk = ["projects", tenantId] as const;
+  const db = getDb();
 
-  const { data: projects = [], isLoading: loading } = useRealtimeQuery<Project[]>({
+  const projectsQuery = useMemo(() => {
+    if (!tenantId) return null;
+    return query(
+      collection(db, `tenants/${tenantId}/projects`),
+      orderBy("createdAt", "desc"),
+      firestoreLimit(50)
+    );
+  }, [db, tenantId]);
+
+  const { data: projects = [], isLoading: loading } = useFirestoreQuery<Project>({
     queryKey: qk,
-    queryFn: async () => {
-      const supabase = getSupabase();
-
-      // 1. Project rows (paginated -- first 50)
-      const { data: projectRows, error: pErr } = await supabase
-        .from("projects")
-        .select(PROJECT_COLS)
-        .eq("tenant_id", tenantId!)
-        .order("created_at", { ascending: false })
-        .range(0, 49);
-
-      if (pErr) throw pErr;
-      if (!projectRows || projectRows.length === 0) return [];
-
-      const projectIds = projectRows.map((p: ProjectRow) => p.id);
-
-      // 2. Phases (renamed from project_phases)
-      const { data: phaseRows } = await supabase
-        .from("phases")
-        .select(PHASE_COLS)
-        .in("project_id", projectIds)
-        .order("sort_order", { ascending: true });
-
-      // 3. Tasks (renamed from project_tasks, now has tenant_id)
-      const { data: taskRows } = await supabase
-        .from("tasks")
-        .select(TASK_COLS)
-        .in("project_id", projectIds)
-        .order("sort_order", { ascending: true });
-
-      // 4. Attachments & comments
-      const taskIds = (taskRows || []).map((t: TaskRow) => t.id);
-
-      let attachmentRows: AttachmentRow[] = [];
-      let commentRows: CommentRow[] = [];
-
-      if (taskIds.length > 0) {
-        const [attRes, comRes] = await Promise.all([
-          supabase
-            .from("task_attachments")
-            .select(ATTACHMENT_COLS)
-            .in("task_id", taskIds),
-          supabase
-            .from("task_comments")
-            .select(COMMENT_COLS)
-            .in("task_id", taskIds)
-            .order("created_at", { ascending: true }),
-        ]);
-        attachmentRows = (attRes.data || []) as AttachmentRow[];
-        commentRows = (comRes.data || []) as CommentRow[];
-      }
-
-      // 5. Activity logs (replaces timeline_events + project_activity_log)
-      const { data: activityRows } = await supabase
-        .from("activity_logs")
-        .select("id,entity_type,entity_id,action,summary,actor_id,created_at")
-        .eq("entity_type", "project")
-        .in("entity_id", projectIds)
-        .order("created_at", { ascending: false });
-
-      // -- Index attachments by task_id --
-      const attachmentsByTask = new Map<string, TaskAttachment[]>();
-      for (const a of attachmentRows) {
-        const list = attachmentsByTask.get(a.task_id) || [];
-        list.push({
-          name: a.name,
-          url: a.url,
-          uploadedAt: a.created_at,
-          uploadedBy: a.uploaded_by,
-        });
-        attachmentsByTask.set(a.task_id, list);
-      }
-
-      // -- Index comments by task_id --
-      const commentsByTask = new Map<string, TaskComment[]>();
-      for (const c of commentRows) {
-        const list = commentsByTask.get(c.task_id) || [];
-        list.push({
-          id: c.id,
-          text: c.text,
-          authorId: c.author_id,
-          authorName: "", // v2: names resolved via JOIN in UI, not stored
-          createdAt: c.created_at,
-          isInternal: c.is_internal,
-        });
-        commentsByTask.set(c.task_id, list);
-      }
-
-      // -- Index tasks by phase_id --
-      const tasksByPhase = new Map<string, Task[]>();
-      for (const t of (taskRows || []) as TaskRow[]) {
-        const list = tasksByPhase.get(t.phase_id) || [];
-        list.push(
-          mapTaskRow(
-            t,
-            attachmentsByTask.get(t.id) || [],
-            commentsByTask.get(t.id) || []
-          )
-        );
-        tasksByPhase.set(t.phase_id, list);
-      }
-
-      // -- Index phases by project_id --
-      const phasesByProject = new Map<string, Phase[]>();
-      for (const ph of (phaseRows || []) as PhaseRow[]) {
-        const list = phasesByProject.get(ph.project_id) || [];
-        list.push(mapPhaseRow(ph, tasksByPhase.get(ph.id) || []));
-        phasesByProject.set(ph.project_id, list);
-      }
-
-      // -- Index activity logs by project_id --
-      const activityByProject = new Map<string, Project["timeline"]>();
-      for (const al of (activityRows || []) as ActivityRow[]) {
-        const list = activityByProject.get(al.entity_id) || [];
-        list.push({
-          id: al.id,
-          action: al.summary || al.action,
-          timestamp: al.created_at,
-          updatedBy: al.actor_id,
-          note: al.summary,
-        });
-        activityByProject.set(al.entity_id, list);
-      }
-
-      // -- Assemble projects --
-      const assembled = (projectRows as ProjectRow[]).map((row) =>
-        mapProjectRow(
-          row,
-          phasesByProject.get(row.id) || [],
-          activityByProject.get(row.id) || []
-        )
-      );
-
-      // -- Enrich --
-      return enrichProjects(assembled);
+    collectionRef: projectsQuery!,
+    mapDoc: (snap) => {
+      const data = snap.data() || {};
+      // Initial mapping without subcollections; enrichment happens via useEffect
+      return mapProjectDoc(snap.id, data, [], []);
     },
-    table: "projects",
-    filter: `tenant_id=eq.${tenantId}`,
-    enabled: !!tenantId,
-    additionalTables: [
-      { table: "phases", filter: `tenant_id=eq.${tenantId}` },
-      { table: "tasks", filter: `tenant_id=eq.${tenantId}` },
-    ],
+    enabled: !!tenantId && !!projectsQuery,
   });
+
+  // Enrich projects with subcollection data (phases, tasks, activity logs)
+  const projectIds = useMemo(() => projects.map((p) => p.id), [projects]);
+  const projectIdsKey = projectIds.join(",");
+  const enrichingRef = useRef<string>("");
+
+  useEffect(() => {
+    if (!tenantId || projects.length === 0) return;
+    // Avoid re-enriching the same set
+    if (enrichingRef.current === projectIdsKey) return;
+    enrichingRef.current = projectIdsKey;
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const enriched = await Promise.all(
+          projects.map(async (project) => {
+            // Skip if already has phases (already enriched from cache)
+            if (project.phases.length > 0) return project;
+            const { phases, timeline } = await fetchProjectSubcollections(
+              tenantId,
+              project.id
+            );
+            return { ...project, phases, timeline };
+          })
+        );
+        if (!cancelled) {
+          const finalProjects = enrichProjects(enriched);
+          queryClient.setQueryData(qk, finalProjects);
+        }
+      } catch (err) {
+        console.error("Error enriching projects:", err);
+      }
+    })();
+
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenantId, projectIdsKey]);
 
   const invalidate = useCallback(
     () => queryClient.invalidateQueries({ queryKey: qk }),
@@ -430,35 +396,45 @@ export function useProjects(tenantId: string | null) {
     async (projectId: string, updates: Partial<Project>) => {
       if (!tenantId) return false;
       try {
-        const supabase = getSupabase();
-
+        const db = getDb();
         const dbUpdates: Record<string, any> = {
-          updated_at: new Date().toISOString(),
+          updatedAt: serverTimestamp(),
         };
         if (updates.status !== undefined) dbUpdates.status = updates.status;
         if (updates.projectName !== undefined) dbUpdates.name = updates.projectName;
-        if (updates.startDate !== undefined) dbUpdates.start_date = updates.startDate;
-        if (updates.expectedEndDate !== undefined) dbUpdates.target_end_date = updates.expectedEndDate;
-        if (updates.completedDate !== undefined) dbUpdates.actual_end_date = updates.completedDate;
-        if (updates.clientName !== undefined) dbUpdates.client_name = updates.clientName;
-        if (updates.clientEmail !== undefined) dbUpdates.client_email = updates.clientEmail;
-        if (updates.clientPhone !== undefined) dbUpdates.client_phone = updates.clientPhone;
-        if (updates.clientCity !== undefined) dbUpdates.client_city = updates.clientCity;
+        if (updates.startDate !== undefined) dbUpdates.startDate = updates.startDate;
+        if (updates.expectedEndDate !== undefined) dbUpdates.targetEndDate = updates.expectedEndDate;
+        if (updates.completedDate !== undefined) dbUpdates.actualEndDate = updates.completedDate;
+        if (updates.clientName !== undefined) dbUpdates.clientName = updates.clientName;
+        if (updates.clientEmail !== undefined) dbUpdates.clientEmail = updates.clientEmail;
+        if (updates.clientPhone !== undefined) dbUpdates.clientPhone = updates.clientPhone;
+        if (updates.clientCity !== undefined) dbUpdates.clientCity = updates.clientCity;
         if (updates.projectProgress !== undefined) dbUpdates.progress = updates.projectProgress;
 
-        const { error } = await supabase
-          .from("projects")
-          .update(dbUpdates)
-          .eq("id", projectId)
-          .eq("tenant_id", tenantId);
-
-        if (error) throw error;
+        await updateDoc(doc(db, `tenants/${tenantId}/projects`, projectId), dbUpdates);
 
         logActivity(tenantId, projectId, {
           action: "Project updated",
           entityType: "project",
           entityId: projectId,
         }).catch(() => {});
+
+        // Send email notification on status change
+        if (updates.status !== undefined) {
+          const project = projects.find((p) => p.id === projectId);
+          if (project?.clientEmail) {
+            sendStatusNotification({
+              tenantId,
+              projectId,
+              clientEmail: project.clientEmail,
+              clientName: project.clientName || "",
+              projectName: project.projectName || "",
+              statusType: "project",
+              entityName: project.projectName || "",
+              newStatus: updates.status,
+            });
+          }
+        }
 
         invalidate();
         return true;
@@ -467,7 +443,7 @@ export function useProjects(tenantId: string | null) {
         return false;
       }
     },
-    [tenantId, invalidate]
+    [tenantId, projects, invalidate]
   );
 
   // -----------------------------------------------------------------------
@@ -477,35 +453,36 @@ export function useProjects(tenantId: string | null) {
     async (projectId: string, phaseId: string, newStatus: Phase["status"]) => {
       if (!tenantId) return false;
       try {
-        const supabase = getSupabase();
+        const db = getDb();
 
-        // v2: table is now "phases"
-        const { error } = await supabase
-          .from("phases")
-          .update({ status: newStatus })
-          .eq("id", phaseId)
-          .eq("project_id", projectId);
-
-        if (error) throw error;
+        await updateDoc(
+          doc(db, `tenants/${tenantId}/projects/${projectId}/phases`, phaseId),
+          { status: newStatus }
+        );
 
         const project = projects.find((p) => p.id === projectId);
         const phaseName =
           project?.phases.find((p) => p.id === phaseId)?.name || "Unknown";
-
-        // v2: insert into activity_logs (replaces timeline_events)
-        await supabase.from("activity_logs").insert({
-          tenant_id: tenantId,
-          entity_type: "project",
-          entity_id: projectId,
-          action: "status_changed",
-          summary: `Phase "${phaseName}" marked as ${newStatus}`,
-        });
 
         logActivity(tenantId, projectId, {
           action: `Phase "${phaseName}" marked as ${newStatus}`,
           entityType: "phase",
           entityId: phaseId,
         }).catch(() => {});
+
+        // Send email notification on phase status change
+        if (project?.clientEmail) {
+          sendStatusNotification({
+            tenantId,
+            projectId,
+            clientEmail: project.clientEmail,
+            clientName: project.clientName || "",
+            projectName: project.projectName || "",
+            statusType: "phase",
+            entityName: phaseName,
+            newStatus,
+          });
+        }
 
         invalidate();
         return true;
@@ -519,7 +496,6 @@ export function useProjects(tenantId: string | null) {
 
   // -----------------------------------------------------------------------
   // updateTask (+ auto-sync progress/status, phase status)
-  // v2: No more cascading project health_status write -- computed lazily
   // -----------------------------------------------------------------------
   const updateTask = useCallback(
     async (
@@ -530,51 +506,48 @@ export function useProjects(tenantId: string | null) {
     ) => {
       if (!tenantId) return false;
       try {
-        const supabase = getSupabase();
+        const db = getDb();
+        const basePath = `tenants/${tenantId}/projects/${projectId}`;
 
         const dbUpdates: Record<string, any> = {};
         if (updates.name !== undefined) dbUpdates.name = updates.name;
         if (updates.notes !== undefined) dbUpdates.notes = updates.notes;
-        if (updates.assignedTo !== undefined) dbUpdates.assignee_id = updates.assignedTo;
-        if (updates.dueDate !== undefined) dbUpdates.due_date = updates.dueDate;
+        if (updates.assignedTo !== undefined) dbUpdates.assigneeId = updates.assignedTo;
+        if (updates.dueDate !== undefined) dbUpdates.dueDate = updates.dueDate;
 
         // Progress-status auto-sync
         if (updates.progress !== undefined) {
           dbUpdates.progress = updates.progress;
           if (updates.progress === 100) {
             dbUpdates.status = "completed";
-            dbUpdates.completed_at = new Date().toISOString();
+            dbUpdates.completedAt = serverTimestamp();
           } else if (updates.progress > 0) {
             dbUpdates.status = "in_progress";
-            dbUpdates.completed_at = null;
+            dbUpdates.completedAt = null;
           } else {
             dbUpdates.status = "pending";
-            dbUpdates.completed_at = null;
+            dbUpdates.completedAt = null;
           }
         } else if (updates.status !== undefined) {
           dbUpdates.status = updates.status;
           if (updates.status === "completed") {
             dbUpdates.progress = 100;
-            dbUpdates.completed_at = new Date().toISOString();
+            dbUpdates.completedAt = serverTimestamp();
           }
         }
 
-        // v2: table is now "tasks"
-        const { error: taskErr } = await supabase
-          .from("tasks")
-          .update(dbUpdates)
-          .eq("id", taskId)
-          .eq("phase_id", phaseId);
-
-        if (taskErr) throw taskErr;
+        await updateDoc(doc(db, `${basePath}/tasks`, taskId), dbUpdates);
 
         // Recalculate phase status from all tasks in this phase
-        const { data: phaseTasks } = await supabase
-          .from("tasks")
-          .select("status,progress")
-          .eq("phase_id", phaseId);
+        const phaseTasksSnap = await getDocs(
+          query(collection(db, `${basePath}/tasks`))
+        );
 
-        if (phaseTasks && phaseTasks.length > 0) {
+        const phaseTasks = phaseTasksSnap.docs
+          .filter((d) => d.data().phaseId === phaseId)
+          .map((d) => d.data());
+
+        if (phaseTasks.length > 0) {
           const allCompleted = phaseTasks.every(
             (t: any) => t.status === "completed"
           );
@@ -588,14 +561,12 @@ export function useProjects(tenantId: string | null) {
               ? "in_progress"
               : "pending";
 
-          await supabase
-            .from("phases")
-            .update({ status: phaseStatus })
-            .eq("id", phaseId);
+          await updateDoc(
+            doc(db, `${basePath}/phases`, phaseId),
+            { status: phaseStatus }
+          );
         }
 
-        // v2: Project progress is computed lazily via v_project_progress view.
-        // No cascading project update needed. Just log the activity.
         logActivity(tenantId, projectId, {
           action:
             updates.progress !== undefined
@@ -628,21 +599,19 @@ export function useProjects(tenantId: string | null) {
     ) => {
       if (!tenantId) return false;
       try {
-        const supabase = getSupabase();
+        const db = getDb();
 
-        const storagePath = `tenants/${tenantId}/projects/${projectId}/tasks/${taskId}/${Date.now()}_${file.name}`;
-        const url = await uploadImage(file, storagePath);
+        const url = await uploadImage(file, tenantId, "projects");
 
-        // v2: task_attachments now has tenant_id
-        const { error } = await supabase.from("task_attachments").insert({
-          task_id: taskId,
-          tenant_id: tenantId,
-          name: file.name,
-          url,
-          uploaded_by: uploadedBy,
-        });
-
-        if (error) throw error;
+        await addDoc(
+          collection(db, `tenants/${tenantId}/projects/${projectId}/tasks/${taskId}/attachments`),
+          {
+            name: file.name,
+            url,
+            uploadedBy,
+            createdAt: serverTimestamp(),
+          }
+        );
 
         logActivity(tenantId, projectId, {
           action: `File "${file.name}" uploaded to task`,
@@ -677,18 +646,17 @@ export function useProjects(tenantId: string | null) {
     ) => {
       if (!tenantId) return false;
       try {
-        const supabase = getSupabase();
+        const db = getDb();
 
-        // v2: task_comments now has tenant_id, no author_name column
-        const { error } = await supabase.from("task_comments").insert({
-          task_id: taskId,
-          tenant_id: tenantId,
-          text,
-          author_id: authorId,
-          is_internal: isInternal,
-        });
-
-        if (error) throw error;
+        await addDoc(
+          collection(db, `tenants/${tenantId}/projects/${projectId}/tasks/${taskId}/comments`),
+          {
+            text,
+            authorId,
+            isInternal,
+            createdAt: serverTimestamp(),
+          }
+        );
 
         logActivity(tenantId, projectId, {
           action: `Comment added to task${isInternal ? " (internal)" : ""}`,
@@ -710,46 +678,39 @@ export function useProjects(tenantId: string | null) {
 
   // -----------------------------------------------------------------------
   // assignRole
-  // v2: No more *_name columns. Only store the tenant_user ID.
   // -----------------------------------------------------------------------
   const assignRole = useCallback(
     async (
       projectId: string,
       role: "designer" | "supervisor" | "manager",
       tenantUserId: string,
-      memberName: string
+      memberName: string,
+      memberEmail?: string
     ) => {
       if (!tenantId) return false;
       try {
-        const supabase = getSupabase();
+        const db = getDb();
 
-        // v2: only ID columns, no name columns
         const fieldMap: Record<string, string> = {
-          designer: "designer_id",
-          supervisor: "supervisor_id",
-          manager: "manager_id",
+          designer: "designerId",
+          supervisor: "supervisorId",
+          manager: "managerId",
         };
 
         const field = fieldMap[role];
 
-        const { error } = await supabase
-          .from("projects")
-          .update({
-            [field]: tenantUserId,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", projectId)
-          .eq("tenant_id", tenantId);
+        await updateDoc(doc(db, `tenants/${tenantId}/projects`, projectId), {
+          [field]: tenantUserId,
+          updatedAt: serverTimestamp(),
+        });
 
-        if (error) throw error;
-
-        // v2: activity_logs (replaces timeline_events)
-        await supabase.from("activity_logs").insert({
-          tenant_id: tenantId,
-          entity_type: "project",
-          entity_id: projectId,
+        // Activity log
+        await addDoc(collection(db, `tenants/${tenantId}/projects/${projectId}/activityLog`), {
+          entityType: "project",
+          entityId: projectId,
           action: "assigned",
           summary: `${role.charAt(0).toUpperCase() + role.slice(1)} assigned: ${memberName}`,
+          createdAt: serverTimestamp(),
         });
 
         logActivity(tenantId, projectId, {
@@ -759,6 +720,23 @@ export function useProjects(tenantId: string | null) {
           metadata: { role, tenantUserId, memberName },
         }).catch(() => {});
 
+        // Fire-and-forget: notify the assigned employee
+        if (memberEmail) {
+          const project = projects.find((p) => p.id === projectId);
+          fetch("/api/send-email", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              type: "project_assigned",
+              memberEmail,
+              memberName,
+              role,
+              projectName: project?.projectName || "",
+              tenantBusinessName: null,
+            }),
+          }).catch((err) => console.error("Project assignment notification failed:", err));
+        }
+
         invalidate();
         return true;
       } catch (error) {
@@ -766,40 +744,42 @@ export function useProjects(tenantId: string | null) {
         return false;
       }
     },
-    [tenantId, invalidate]
+    [tenantId, projects, invalidate]
   );
 
   // -----------------------------------------------------------------------
   // fetchActivityLog
-  // v2: reads from activity_logs (replaces project_activity_log)
   // -----------------------------------------------------------------------
   const fetchActivityLog = useCallback(
     async (projectId: string): Promise<ActivityLogEntry[]> => {
       if (!tenantId) return [];
-      const supabase = getSupabase();
+      const db = getDb();
 
-      const { data, error } = await supabase
-        .from("activity_logs")
-        .select("id,entity_type,entity_id,action,summary,actor_id,metadata,created_at")
-        .eq("tenant_id", tenantId)
-        .eq("entity_id", projectId)
-        .order("created_at", { ascending: false })
-        .limit(50);
+      try {
+        const snap = await getDocs(
+          query(
+            collection(db, `tenants/${tenantId}/projects/${projectId}/activityLog`),
+            orderBy("createdAt", "desc"),
+            firestoreLimit(50)
+          )
+        );
 
-      if (error) {
+        return snap.docs.map((d) => {
+          const data = d.data();
+          return {
+            id: d.id,
+            action: data.summary || data.action || "",
+            entityType: data.entityType ?? "",
+            entityId: data.entityId ?? "",
+            performedBy: data.actorId,
+            metadata: data.metadata,
+            timestamp: data.createdAt ?? "",
+          };
+        });
+      } catch (error) {
         console.error("Error fetching activity log:", error);
         return [];
       }
-
-      return (data || []).map((row: any) => ({
-        id: row.id,
-        action: row.summary || row.action,
-        entityType: row.entity_type,
-        entityId: row.entity_id,
-        performedBy: row.actor_id,
-        metadata: row.metadata,
-        timestamp: row.created_at,
-      }));
     },
     [tenantId]
   );

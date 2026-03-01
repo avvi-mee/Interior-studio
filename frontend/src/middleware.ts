@@ -1,94 +1,37 @@
-import { createServerClient } from "@supabase/ssr";
-import { NextResponse } from "next/server";
-import type { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
-export async function middleware(req: NextRequest) {
-  const res = NextResponse.next();
+export function middleware(request: NextRequest) {
+  const { pathname } = request.nextUrl;
 
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() {
-          return req.cookies.getAll().map(({ name, value }) => ({ name, value }));
-        },
-        setAll(cookies) {
-          cookies.forEach(({ name, value, options }) => {
-            res.cookies.set(name, value, options);
-          });
-        },
-      },
-    }
-  );
-
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-
-  const pathname = req.nextUrl.pathname;
-
-  // --- Dashboard routes: require session + validate user has a tenant ---
-  if (pathname.startsWith("/dashboard")) {
-    if (!session) {
-      const loginUrl = new URL("/login", req.url);
-      loginUrl.searchParams.set("redirectTo", pathname);
-      return NextResponse.redirect(loginUrl);
-    }
-
-    // Verify user exists in users table with a tenant_id
-    const { data: userData } = await supabase
-      .from("users")
-      .select("role, tenant_id")
-      .eq("id", session.user.id)
-      .maybeSingle();
-
-    if (!userData || (!userData.tenant_id && userData.role !== "superadmin")) {
-      // User is authenticated but has no tenant — redirect to login
-      const loginUrl = new URL("/login", req.url);
-      loginUrl.searchParams.set("error", "no_tenant");
-      return NextResponse.redirect(loginUrl);
-    }
+  // Pass through static assets, API routes, and internal Next.js paths
+  if (
+    pathname.startsWith("/_next") ||
+    pathname.startsWith("/api") ||
+    pathname.includes(".")
+  ) {
+    return NextResponse.next();
   }
 
-  // --- Admin routes: require session + superadmin role ---
-  if (pathname.startsWith("/admin")) {
-    if (!session) {
-      const loginUrl = new URL("/admin", req.url);
-      return NextResponse.redirect(loginUrl);
-    }
-
-    // Verify superadmin role
-    const { data: adminData } = await supabase
-      .from("users")
-      .select("role")
-      .eq("id", session.user.id)
-      .maybeSingle();
-
-    if (adminData?.role !== "superadmin") {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-    }
+  // Extract tenant slug from the first path segment (path-based routing)
+  // e.g. /aviraj-interiors/about → slug = "aviraj-interiors"
+  const segments = pathname.split("/").filter(Boolean);
+  if (segments.length > 0) {
+    const response = NextResponse.next();
+    response.headers.set("x-tenant-slug", segments[0]);
+    return response;
   }
 
-  // --- API routes: require auth (session, bearer token, or cron secret) ---
-  if (pathname.startsWith("/api/")) {
-    const authHeader = req.headers.get("authorization");
-    const hasBearerToken = authHeader?.startsWith("Bearer ");
-    const cronSecret = req.headers.get("x-cron-secret");
-    const hasCronSecret = !!cronSecret && cronSecret === process.env.CRON_SECRET;
-
-    if (!session && !hasBearerToken && !hasCronSecret) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-  }
-
-  return res;
+  return NextResponse.next();
 }
 
 export const config = {
   matcher: [
-    "/dashboard/:path*",
-    "/admin/:path*",
-    "/api/:path*",
+    /*
+     * Match all paths except:
+     * - _next/static (static files)
+     * - _next/image (image optimization)
+     * - favicon.ico (favicon)
+     */
+    "/((?!_next/static|_next/image|favicon.ico).*)",
   ],
 };
