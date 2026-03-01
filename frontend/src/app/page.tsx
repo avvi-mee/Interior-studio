@@ -12,7 +12,7 @@ export default function Home() {
               U
             </div>
             <span className="text-lg font-extrabold tracking-tight text-[#0F172A] uppercase">
-              Unmatrix.io
+              Unmatrix
             </span>
           </div>
           <div className="hidden md:flex items-center gap-1">
@@ -232,7 +232,7 @@ export default function Home() {
               U
             </div>
             <span className="text-sm font-extrabold tracking-tight text-[#0F172A] uppercase">
-              Unmatrix.io
+              Unmatrix
             </span>
           </div>
           <div className="flex gap-8 text-xs font-medium text-gray-400 uppercase tracking-wider">
