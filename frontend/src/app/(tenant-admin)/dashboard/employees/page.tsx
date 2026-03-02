@@ -20,7 +20,7 @@ import {
 import { Label } from "@/components/ui/label";
 import { useTenantAuth } from "@/hooks/useTenantAuth";
 import { getDb, getFirebaseAuth } from "@/lib/firebase";
-import { collection, query, orderBy, onSnapshot, doc, updateDoc, addDoc, deleteDoc } from "firebase/firestore";
+import { collection, query, onSnapshot, doc, updateDoc, addDoc, deleteDoc } from "firebase/firestore";
 import { Plus, Trash2, Edit, Loader2, KeyRound, ShieldCheck, ShieldOff, Eye, EyeOff } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -86,12 +86,12 @@ export default function EmployeesPage() {
     useEffect(() => {
         if (!tenant?.id) return;
         const db = getDb();
-        const q = query(
-            collection(db, `tenants/${tenant.id}/employees`),
-            orderBy("created_at", "desc")
-        );
+        // No orderBy — legacy docs use created_at (string) while new docs use
+        // joinedAt (serverTimestamp). Firestore excludes docs missing the ordered
+        // field, so omit ordering to show ALL employees.
+        const q = query(collection(db, `tenants/${tenant.id}/employees`));
         const unsub = onSnapshot(q, (snap) => {
-            setEmployees(snap.docs.map(d => {
+            const list = snap.docs.map(d => {
                 const r = d.data();
                 return {
                     id: d.id,
@@ -102,14 +102,21 @@ export default function EmployeesPage() {
                     totalWork: r.total_work || 0,
                     currentWork: r.current_work || "None",
                     upcomingWork: r.upcoming_work || "None",
-                    role: r.role_names?.[0] || r.role || "designer",
-                    roles: r.role_names || r.roles || [],
-                    primaryRole: r.role_names?.[0] || r.role || "designer",
-                    tenantId: r.tenant_id || tenant.id,
-                    createdAt: r.created_at,
+                    role: r.role_names?.[0] || r.roles?.[0] || r.role || "designer",
+                    roles: r.role_names || r.roles || (r.role ? [r.role] : []),
+                    primaryRole: r.role_names?.[0] || r.roles?.[0] || r.role || "designer",
+                    tenantId: r.tenant_id || r.tenantId || tenant.id,
+                    createdAt: r.created_at || r.createdAt,
                     hasLoginAccess: !!(r.userId),
                 };
-            }));
+            });
+            // Sort client-side: most recent first, falling back across field variants
+            list.sort((a, b) => {
+                const ta = a.createdAt ? new Date(a.createdAt?.toDate?.() ?? a.createdAt).getTime() : 0;
+                const tb = b.createdAt ? new Date(b.createdAt?.toDate?.() ?? b.createdAt).getTime() : 0;
+                return tb - ta;
+            });
+            setEmployees(list);
             setLoading(false);
         });
         return () => unsub();
