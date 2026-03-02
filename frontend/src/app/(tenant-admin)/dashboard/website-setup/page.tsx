@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useTenantAuth } from "@/hooks/useTenantAuth";
 import { Loader2, ExternalLink, Copy, Check, Eye } from "lucide-react";
@@ -8,7 +8,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
 import { getTenantUrl } from "@/lib/tenantUrl";
-import { getFirebaseAuth } from "@/lib/firebase";
 
 // Import tab components
 import BrandTab from "@/components/dashboard/website-builder/BrandTab";
@@ -23,39 +22,10 @@ export default function WebsiteSetupPage() {
     const { toast } = useToast();
     const [copied, setCopied] = useState(false);
     const [previewOpen, setPreviewOpen] = useState(false);
-    const [generatedSlug, setGeneratedSlug] = useState<string | null>(null);
-    const [slugAttempted, setSlugAttempted] = useState(false);
 
-    // Use slug (from Firestore or freshly generated), fall back to tenant ID
-    const urlIdentifier = tenant?.slug || generatedSlug || tenant?.id || "";
+    // Always use tenant ID as the URL identifier (no slug)
+    const urlIdentifier = tenant?.id || "";
     const publicUrl = urlIdentifier ? getTenantUrl(urlIdentifier) : "";
-
-    // Auto-generate slug via API if tenant has no slug
-    const ensureSlug = useCallback(async () => {
-        if (!tenant || tenant.slug || generatedSlug || slugAttempted) return;
-        setSlugAttempted(true);
-        try {
-            const idToken = await getFirebaseAuth().currentUser?.getIdToken();
-            const res = await fetch("/api/ensure-slug", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    "Authorization": `Bearer ${idToken}`,
-                },
-                body: JSON.stringify({ tenantId: tenant.id, tenantName: tenant.name }),
-            });
-            const data = await res.json();
-            if (res.ok && data.slug) {
-                setGeneratedSlug(data.slug);
-            }
-        } catch (err) {
-            console.error("Slug generation failed:", err);
-        }
-    }, [tenant, generatedSlug, slugAttempted]);
-
-    useEffect(() => {
-        ensureSlug();
-    }, [ensureSlug]);
 
     const copyToClipboard = () => {
         navigator.clipboard.writeText(publicUrl);

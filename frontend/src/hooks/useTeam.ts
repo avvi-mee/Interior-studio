@@ -7,7 +7,6 @@ import {
   collection,
   doc,
   query,
-  orderBy,
   limit,
   getDocs,
   addDoc,
@@ -48,16 +47,17 @@ function mapDocToTeamMember(id: string, data: any): TeamMember {
   return {
     id,
     userId: data.userId ?? id,
-    fullName: data.fullName ?? "",
+    // Handle both camelCase (new) and snake_case (legacy admin page)
+    fullName: data.fullName ?? data.full_name ?? data.name ?? "",
     email: data.email ?? "",
     phone: data.phone ?? "",
     avatarUrl: data.avatarUrl,
     area: data.area ?? "",
-    roles: data.roles ?? [],
-    isOwner: data.isOwner ?? false,
-    isActive: data.isActive ?? true,
-    joinedAt: data.joinedAt ?? data.createdAt ?? "",
-    tenantId: data.tenantId ?? "",
+    roles: data.roles ?? data.role_names ?? (data.role ? [data.role] : []),
+    isOwner: data.isOwner ?? data.is_owner ?? false,
+    isActive: data.isActive ?? data.is_active ?? true,
+    joinedAt: data.joinedAt ?? data.createdAt ?? data.created_at ?? "",
+    tenantId: data.tenantId ?? data.tenant_id ?? "",
   };
 }
 
@@ -68,9 +68,10 @@ export function useTeam(tenantId: string | null) {
 
   const employeesQuery = useMemo(() => {
     if (!tenantId) return null;
+    // No orderBy — legacy docs use created_at (string) while new docs use joinedAt (timestamp).
+    // Firestore excludes docs missing the ordered field, so we skip ordering entirely.
     return query(
       collection(db, `tenants/${tenantId}/employees`),
-      orderBy("joinedAt", "desc"),
       limit(100)
     );
   }, [db, tenantId]);

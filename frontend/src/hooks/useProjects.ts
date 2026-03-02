@@ -178,20 +178,25 @@ async function fetchProjectSubcollections(
   const db = getDb();
   const basePath = `tenants/${tenantId}/projects/${projectId}`;
 
-  // Fetch phases, tasks, and activity logs in parallel
-  const [phasesSnap, tasksSnap, activitySnap] = await Promise.all([
+  // Fetch phases, tasks, and activity logs in parallel — use allSettled so a
+  // permission error on one subcollection doesn't abort the others.
+  const [phasesResult, tasksResult, activityResult] = await Promise.allSettled([
     getDocs(query(collection(db, `${basePath}/phases`), orderBy("sortOrder", "asc"))),
     getDocs(query(collection(db, `${basePath}/tasks`), orderBy("sortOrder", "asc"))),
     getDocs(query(collection(db, `${basePath}/activityLog`), orderBy("createdAt", "desc"))),
   ]);
 
+  const phasesSnap  = phasesResult.status   === "fulfilled" ? phasesResult.value   : null;
+  const tasksSnap   = tasksResult.status    === "fulfilled" ? tasksResult.value    : null;
+  const activitySnap = activityResult.status === "fulfilled" ? activityResult.value : null;
+
+  if (!phasesSnap && !tasksSnap) return { phases: [], timeline: [] };
+
   // Build tasks with attachments/comments (fetched per task)
-  const taskIds = tasksSnap.docs.map((d) => d.id);
   const attachmentsByTask = new Map<string, TaskAttachment[]>();
   const commentsByTask = new Map<string, TaskComment[]>();
 
-  // Fetch attachments and comments for all tasks in parallel
-  if (taskIds.length > 0) {
+  if (tasksSnap && tasksSnap.docs.length > 0) {
     const fetchPromises: Promise<void>[] = [];
 
     for (const taskDoc of tasksSnap.docs) {
@@ -210,7 +215,7 @@ async function fetchProjectSubcollections(
             };
           });
           if (atts.length > 0) attachmentsByTask.set(taskId, atts);
-        })
+        }).catch(() => { /* skip attachment failures */ })
       );
 
       fetchPromises.push(
@@ -227,16 +232,16 @@ async function fetchProjectSubcollections(
             };
           });
           if (comments.length > 0) commentsByTask.set(taskId, comments);
-        })
+        }).catch(() => { /* skip comment failures */ })
       );
     }
 
-    await Promise.all(fetchPromises);
+    await Promise.allSettled(fetchPromises);
   }
 
   // Index tasks by phaseId
   const tasksByPhase = new Map<string, Task[]>();
-  for (const taskDoc of tasksSnap.docs) {
+  for (const taskDoc of (tasksSnap?.docs ?? [])) {
     const data = taskDoc.data();
     const phaseId = data.phaseId;
     const list = tasksByPhase.get(phaseId) || [];
@@ -252,13 +257,13 @@ async function fetchProjectSubcollections(
   }
 
   // Build phases
-  const phases = phasesSnap.docs.map((phaseDoc) => {
+  const phases = (phasesSnap?.docs ?? []).map((phaseDoc) => {
     const data = phaseDoc.data();
     return mapPhaseDoc(phaseDoc.id, data, tasksByPhase.get(phaseDoc.id) || []);
   });
 
   // Build timeline
-  const timeline: Project["timeline"] = activitySnap.docs.map((alDoc) => {
+  const timeline: Project["timeline"] = (activitySnap?.docs ?? []).map((alDoc) => {
     const data = alDoc.data();
     return {
       id: alDoc.id,
