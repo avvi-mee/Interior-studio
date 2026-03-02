@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { getFirebaseAuth } from "@/lib/firebase";
 import { createUserWithEmailAndPassword } from "firebase/auth";
-import { addDesigner, generateSlug } from "@/lib/firestoreHelpers";
+import { generateSlug } from "@/lib/firestoreHelpers";
 import { validateTenantSlug } from "@/lib/reservedSlugs";
 import { UserPlus } from "lucide-react";
 
@@ -76,15 +76,29 @@ export default function SignupPage() {
                 formData.password
             );
 
-            // Create tenant record with pending status
-            await addDesigner({
-                uid: userCredential.user.uid,
-                name: formData.businessName,
-                email: formData.email,
-                phone: formData.phone,
-                slug,
-                plan: "free",
+            // Get ID token for the newly created user
+            const idToken = await userCredential.user.getIdToken();
+
+            // Create tenant record via API (Admin SDK bypasses Firestore security rules)
+            const res = await fetch("/api/auth/create-tenant", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${idToken}`,
+                },
+                body: JSON.stringify({
+                    uid: userCredential.user.uid,
+                    name: formData.name,
+                    email: formData.email,
+                    phone: formData.phone,
+                    businessName: formData.businessName,
+                    slug,
+                }),
             });
+            if (!res.ok) {
+                const data = await res.json();
+                throw new Error(data.error || "Failed to create tenant account");
+            }
 
             setSuccess(true);
 
